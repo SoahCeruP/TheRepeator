@@ -1412,13 +1412,16 @@ private fun RenderLargeText(
     currentMatchIndex: Int = 0,
     onMatchesFound: (List<Int>) -> Unit = {}
 ) {
-    val maxPreviewChars = 200_000
-    val isTruncated = text.length > maxPreviewChars
+    val maxChars = if (isExpanded) 1_000_000 else 200_000
+    val isActuallyTruncated = text.length > maxChars
+    
     val displayContent = remember(text, isExpanded) {
-        if (isTruncated && !isExpanded) text.take(maxPreviewChars) else text
+        if (isActuallyTruncated) text.take(maxChars) else text
     }
 
-    val lines = remember(displayContent) { displayContent.split("\n") }
+    val lines = remember(displayContent) { 
+        displayContent.split("\n")
+    }
     
     val matchIndices = remember(lines, searchQuery) {
         if (searchQuery.isEmpty()) emptyList<Int>()
@@ -1436,7 +1439,7 @@ private fun RenderLargeText(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (isTruncated && !isExpanded) {
+        if (isActuallyTruncated) {
             Card(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFFACC15).copy(alpha = 0.1f))
@@ -1445,7 +1448,7 @@ private fun RenderLargeText(
                     Icon(Icons.Default.Warning, null, tint = Color(0xFFFACC15), modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "Showing first ${formatSize(maxPreviewChars)} of ${formatSize(text.length)}. Expand for full view.",
+                        "Content truncated to ${formatSize(maxChars)} for performance. ${if (!isExpanded) "Expand for more." else ""}",
                         color = Color(0xFFFACC15),
                         fontSize = 11.sp
                     )
@@ -1457,33 +1460,38 @@ private fun RenderLargeText(
         
         SelectionContainer { 
             LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
-                itemsIndexed(lines) { index, line ->
-                    if (searchQuery.isNotEmpty() && line.contains(searchQuery, ignoreCase = true)) {
+                itemsIndexed(lines, key = { index, _ -> index }) { index, line ->
+                    val displayLine = remember(line) { 
+                        if (line.length > 10_000) line.take(10_000) + " ... [LINE TRUNCATED]" else line 
+                    }
+                    
+                    if (searchQuery.isNotEmpty() && displayLine.contains(searchQuery, ignoreCase = true)) {
                         val isCurrentMatchLine = matchIndices.getOrNull(currentMatchIndex) == index
-                        val annotatedString = buildAnnotatedString {
-                            var startMatch = 0
-                            while (startMatch < line.length) {
-                                val matchIdx = line.indexOf(searchQuery, startMatch, ignoreCase = true)
-                                if (matchIdx == -1) { append(line.substring(startMatch)); break }
-                                append(line.substring(startMatch, matchIdx))
-                                val bgColor = if (isCurrentMatchLine) Color(0xFF7C3AED) else Color(0xFFFACC15).copy(alpha = 0.8f)
-                                val textColor = if (isCurrentMatchLine) Color.White else Color.Black
-                                withStyle(style = SpanStyle(background = bgColor, color = textColor)) {
-                                    append(line.substring(matchIdx, matchIdx + searchQuery.length))
+                        val annotatedString = remember(displayLine, searchQuery, isCurrentMatchLine) {
+                            buildAnnotatedString {
+                                var startMatch = 0
+                                while (startMatch < displayLine.length) {
+                                    val matchIdx = displayLine.indexOf(searchQuery, startMatch, ignoreCase = true)
+                                    if (matchIdx == -1) { append(displayLine.substring(startMatch)); break }
+                                    append(displayLine.substring(startMatch, matchIdx))
+                                    val bgColor = if (isCurrentMatchLine) Color(0xFF7C3AED) else Color(0xFFFACC15).copy(alpha = 0.8f)
+                                    val textColor = if (isCurrentMatchLine) Color.White else Color.Black
+                                    withStyle(style = SpanStyle(background = bgColor, color = textColor)) {
+                                        append(displayLine.substring(matchIdx, matchIdx + searchQuery.length))
+                                    }
+                                    startMatch = matchIdx + searchQuery.length
                                 }
-                                startMatch = matchIdx + searchQuery.length
                             }
                         }
                         Text(annotatedString, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     } else {
-                        if (useSyntaxHighlighting) {
-                            Text(highlightSyntax(line), color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
-                        } else {
-                            Text(line, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
+                        val annotatedLine = remember(displayLine, useSyntaxHighlighting) {
+                            if (useSyntaxHighlighting) highlightSyntax(displayLine) else AnnotatedString(displayLine)
                         }
+                        Text(annotatedLine, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     }
                 }
-                if (isTruncated && !isExpanded) {
+                if (isActuallyTruncated) {
                     item {
                         Text(
                             "\n[... CONTENT TRUNCATED ...]\n",
@@ -1589,13 +1597,19 @@ private fun HistoryDetailView(
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
                     IconButton(
-                        onClick = { if (currentMatchIndex > 0) currentMatchIndex-- else if (matchIndices.isNotEmpty()) currentMatchIndex = matchIndices.size - 1 },
+                        onClick = { 
+                            if (currentMatchIndex > 0) currentMatchIndex-- 
+                            else if (matchIndices.isNotEmpty()) currentMatchIndex = matchIndices.size - 1 
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(Icons.Default.KeyboardArrowUp, null, tint = Color.White)
                     }
                     IconButton(
-                        onClick = { if (currentMatchIndex < matchIndices.size - 1) currentMatchIndex++ else currentMatchIndex = 0 },
+                        onClick = { 
+                            if (currentMatchIndex < matchIndices.size - 1) currentMatchIndex++ 
+                            else currentMatchIndex = 0 
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
@@ -1611,7 +1625,7 @@ private fun HistoryDetailView(
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     if (page == 0) {
                         RenderLargeText(
-                            text = vm.getRawFromTheRepeatorRequest(detail!!), 
+                            text = if (detail != null) vm.getRawFromTheRepeatorRequest(detail) else "", 
                             searchQuery = searchQuery, 
                             context = context, 
                             isExpanded = isExpandedFull,
@@ -1621,10 +1635,10 @@ private fun HistoryDetailView(
                         )
                     } else {
                         ResponseSection(
-                            response = vm.getRawResponse(detail!!),
+                            response = if (detail != null) vm.getRawResponse(detail) else "",
                             onExtract = { /* Handle if needed */ },
                             onPrettifyBody = { vm.prettifyBody(it) },
-                            statusCode = detail.statusCode,
+                            statusCode = detail?.statusCode,
                             initialPage = if (isBeautified) 0 else 1
                         )
                     }
@@ -1667,10 +1681,21 @@ private fun ResponseSection(
     var isExpanded by remember { mutableStateOf(false) }
     
     val fullHeaders = remember(response) {
-        if (response.contains("\n\n")) response.substringBefore("\n\n") else ""
+        val splitIndex = response.indexOf("\n\n")
+        val splitIndex2 = response.indexOf("\r\n\r\n")
+        val finalSplit = when {
+            splitIndex2 != -1 && splitIndex != -1 -> minOf(splitIndex, splitIndex2)
+            splitIndex2 != -1 -> splitIndex2
+            else -> splitIndex
+        }
+        if (finalSplit != -1) response.substring(0, finalSplit) else response
     }
     val body = remember(response) {
-        if (response.contains("\n\n")) response.substringAfter("\n\n") else response
+        val splitIndex = response.indexOf("\n\n")
+        val splitIndex2 = response.indexOf("\r\n\r\n")
+        if (splitIndex2 != -1) response.substring(splitIndex2 + 4)
+        else if (splitIndex != -1) response.substring(splitIndex + 2)
+        else ""
     }
     
     val cookies = remember(fullHeaders) {
@@ -1685,9 +1710,14 @@ private fun ResponseSection(
     val scope = rememberCoroutineScope()
     
     var searchQuery by remember { mutableStateOf("") }
-    var matchIndices by remember { mutableStateOf(emptyList<Int>()) }
-    var currentMatchIndex by remember { mutableIntStateOf(0) }
-    val listState = rememberLazyListState()
+    
+    // Independent states for each tab to prevent "hanging" and scroll interference
+    val tabsCount = tabs.size
+    val listStates = remember { List(4) { LazyListState() } }
+    val matchIndicesList = remember { List(4) { mutableStateOf(emptyList<Int>()) } }
+    val currentMatchIndices = remember { List(4) { mutableIntStateOf(0) } }
+    
+    val matchIndices = matchIndicesList[subTab].value
     
     val statusColor = when (statusCode) {
         in 200..299 -> Color(0xFF22C55E)
@@ -1752,7 +1782,7 @@ private fun ResponseSection(
                     searchQuery, 
                     { 
                         searchQuery = it
-                        currentMatchIndex = 0
+                        currentMatchIndices[subTab].intValue = 0
                     }, 
                     "Search...", 
                     Modifier.weight(1f), 
@@ -1760,19 +1790,29 @@ private fun ResponseSection(
                 )
                 if (searchQuery.isNotEmpty()) {
                     Text(
-                        "${if (matchIndices.isEmpty()) 0 else currentMatchIndex + 1}/${matchIndices.size}",
+                        "${if (matchIndices.isEmpty()) 0 else currentMatchIndices[subTab].intValue + 1}/${matchIndices.size}",
                         color = Color.Gray,
                         fontSize = 10.sp,
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
                     IconButton(
-                        onClick = { if (currentMatchIndex > 0) currentMatchIndex-- else if (matchIndices.isNotEmpty()) currentMatchIndex = matchIndices.size - 1 },
+                        onClick = { 
+                            val current = currentMatchIndices[subTab]
+                            val indices = matchIndicesList[subTab].value
+                            if (current.intValue > 0) current.intValue-- 
+                            else if (indices.isNotEmpty()) current.intValue = indices.size - 1 
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(Icons.Default.KeyboardArrowUp, null, tint = Color.White)
                     }
                     IconButton(
-                        onClick = { if (currentMatchIndex < matchIndices.size - 1) currentMatchIndex++ else currentMatchIndex = 0 },
+                        onClick = { 
+                            val current = currentMatchIndices[subTab]
+                            val indices = matchIndicesList[subTab].value
+                            if (current.intValue < indices.size - 1) current.intValue++ 
+                            else current.intValue = 0 
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
@@ -1783,7 +1823,12 @@ private fun ResponseSection(
                 }
             }
             
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+            HorizontalPager(
+                state = pagerState, 
+                modifier = Modifier.weight(1f), 
+                userScrollEnabled = true, 
+                beyondViewportPageCount = 1
+            ) { page ->
                 val content = when (page) {
                     0 -> onPrettifyBody(body)
                     1 -> response
@@ -1796,9 +1841,9 @@ private fun ResponseSection(
                     searchQuery = searchQuery, 
                     context = context, 
                     isExpanded = isExpanded,
-                    listState = listState,
-                    currentMatchIndex = currentMatchIndex,
-                    onMatchesFound = { matchIndices = it }
+                    listState = listStates[page],
+                    currentMatchIndex = currentMatchIndices[page].intValue,
+                    onMatchesFound = { matchIndicesList[page].value = it }
                 )
             }
         }
@@ -1823,12 +1868,13 @@ private fun ResponseSection(
     }
 }
 
+private val syntaxRegex = Regex("""(".*?")(\s*:)?|(\b\d+\b)|([{}\[\]])|(\btrue\b|\bfalse\b|\bnull\b)|(<[^>]+>)""")
+
 private fun highlightSyntax(line: String): AnnotatedString {
     if (line.length > 2000) return AnnotatedString(line)
     return buildAnnotatedString {
         var start = 0
-        val regex = Regex("""(".*?")(\s*:)?|(\b\d+\b)|([{}\[\]])|(\btrue\b|\bfalse\b|\bnull\b)|(<[^>]+>)""")
-        val matches = regex.findAll(line)
+        val matches = syntaxRegex.findAll(line)
         for (m in matches) {
             append(line.substring(start, m.range.first))
             val color = when {

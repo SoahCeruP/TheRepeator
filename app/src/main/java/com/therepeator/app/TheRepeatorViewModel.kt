@@ -890,7 +890,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         return try {
             val header = String(Base64.decode(parts[0], Base64.URL_SAFE), StandardCharsets.UTF_8)
             val payload = String(Base64.decode(parts[1], Base64.URL_SAFE), StandardCharsets.UTF_8)
-            "Header: $header\nPayload: $payload"
+            val prettyHeader = prettifyBody(header)
+            val prettyPayload = prettifyBody(payload)
+            "Header: $prettyHeader\nPayload: $prettyPayload"
         } catch (e: Exception) { "JWT Decode Error: ${e.message}" }
     }
 
