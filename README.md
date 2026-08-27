@@ -20,5 +20,8 @@ I searched for an app that would do this without rooting the phone and didn't fi
 
 You can find the latest stable APK in the [Releases](https://github.com/SoahCeruP/TheRepeator/releases) section.
 
+
+### Contributions are welcomed 
+
 ---
 *Disclaimer: This tool is intended for legal security testing and development purposes only.*
