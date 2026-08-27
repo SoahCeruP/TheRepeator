@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="repeator_dark">#0B1020</color>
+    <color name="repeator_panel">#111827</color>
+    <color name="repeator_surface">#1F2937</color>
+    <color name="repeator_accent">#7C3AED</color>
+    <color name="repeator_accent_2">#22C55E</color>
+    <color name="repeator_orange">#F59E0B</color>
+    <color name="repeator_red">#EF4444</color>
+    <color name="repeator_text">#F8FAFC</color>
+    <color name="repeator_muted">#94A3B8</color>
+</resources>

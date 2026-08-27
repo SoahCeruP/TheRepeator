@@ -1,0 +1,21 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield Outer -->
+    <path
+        android:fillColor="#7C3AED"
+        android:pathData="M54,12L20,27v30c0,22 14,41 34,48 20,-7 34,-26 34,-48V27L54,12z"/>
+    <!-- Magnifying Glass / Interception Motif -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M54,35c-9.9,0 -18,8.1 -18,18s8.1,18 18,18 18,-8.1 18,-18 -8.1,-18 -18,-18zm0,30c-6.6,0 -12,-5.4 -12,-12s5.4,-12 12,-12 12,5.4 12,12 -5.4,12 -12,12z"/>
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M70,66l10,10l-4,4l-10,-10z"/>
+    <!-- Signal/Interception Lines -->
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M40,53h28v2H40zM44,48h20v2H44zM48,58h12v2H48z"/>
+</vector>
