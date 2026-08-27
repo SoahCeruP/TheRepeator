@@ -18,7 +18,7 @@ I searched for an app that would do this without rooting the phone and didn't fi
 
 ## Releases
 
-You can find the latest stable APK in the [Releases](https://github.com/YOUR_USERNAME/TheRepeator/releases) section.
+You can find the latest stable APK in the [Releases](https://github.com/SoahCeruP/TheRepeator/releases) section.
 
 ---
 *Disclaimer: This tool is intended for legal security testing and development purposes only.*

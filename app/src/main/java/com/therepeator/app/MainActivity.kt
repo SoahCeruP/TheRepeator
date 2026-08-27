@@ -1,6 +1,6 @@
 package com.therepeator.app
 
-import com.therepeator.app.R
+import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -66,10 +66,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import java.net.URL
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -133,6 +130,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     val browserWebView = remember {
         WebView(context).apply {
             settings.apply {
+                @SuppressLint("SetJavaScriptEnabled")
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 @Suppress("DEPRECATION")
@@ -151,7 +149,6 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 } 
             }
             webViewClient = object : WebViewClient() {
-                @android.annotation.SuppressLint("WebViewClientOnReceivedSslError")
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     url?.let { 
@@ -165,6 +162,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                         kotlinx.coroutines.runBlocking { vm.handleBrowserTraffic(req.method, req.url.toString(), req.requestHeaders) } 
                     } ?: super.shouldInterceptRequest(view, request)
                 }
+                @SuppressLint("WebViewClientOnReceivedSslError")
                 override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: android.net.http.SslError?) {
                     handler?.proceed() 
                 }
@@ -1406,7 +1404,7 @@ private fun SettingsDialog(matchReplaceRules: List<MatchReplaceRule>, onAddRule:
 private fun RenderLargeText(
     text: String,
     searchQuery: String,
-    context: android.content.Context,
+    context: Context,
     isExpanded: Boolean,
     listState: LazyListState = rememberLazyListState(),
     currentMatchIndex: Int = 0,
@@ -1424,7 +1422,7 @@ private fun RenderLargeText(
     }
     
     val matchIndices = remember(lines, searchQuery) {
-        if (searchQuery.isEmpty()) emptyList<Int>()
+        if (searchQuery.isEmpty()) emptyList()
         else lines.mapIndexedNotNull { index, line -> if (line.contains(searchQuery, ignoreCase = true)) index else null }
     }
 
@@ -1523,7 +1521,7 @@ private fun HistoryDetailView(
     detail: TheRepeatorRequest?,
     onBack: () -> Unit,
     vm: TheRepeatorViewModel,
-    context: android.content.Context
+    context: Context
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var matchIndices by remember { mutableStateOf(emptyList<Int>()) }
@@ -1625,7 +1623,7 @@ private fun HistoryDetailView(
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     if (page == 0) {
                         RenderLargeText(
-                            text = if (detail != null) vm.getRawFromTheRepeatorRequest(detail) else "", 
+                            text = vm.getRawFromTheRepeatorRequest(detail), 
                             searchQuery = searchQuery, 
                             context = context, 
                             isExpanded = isExpandedFull,
@@ -1635,10 +1633,10 @@ private fun HistoryDetailView(
                         )
                     } else {
                         ResponseSection(
-                            response = if (detail != null) vm.getRawResponse(detail) else "",
+                            response = vm.getRawResponse(detail),
                             onExtract = { /* Handle if needed */ },
                             onPrettifyBody = { vm.prettifyBody(it) },
-                            statusCode = detail?.statusCode,
+                            statusCode = detail.statusCode,
                             initialPage = if (isBeautified) 0 else 1
                         )
                     }
@@ -1671,11 +1669,11 @@ private fun ResponseSection(
     response: String,
     onExtract: (String) -> Unit,
     onPrettifyBody: (String) -> String,
+    modifier: Modifier = Modifier,
     metadata: ResponseMetadata? = null,
     statusCode: Int? = null,
     initialPage: Int = 0,
-    showExtract: Boolean = true,
-    modifier: Modifier = Modifier
+    showExtract: Boolean = true
 ) {
     val context = LocalContext.current
     var isExpanded by remember { mutableStateOf(false) }
@@ -1712,7 +1710,6 @@ private fun ResponseSection(
     var searchQuery by remember { mutableStateOf("") }
     
     // Independent states for each tab to prevent "hanging" and scroll interference
-    val tabsCount = tabs.size
     val listStates = remember { List(4) { LazyListState() } }
     val matchIndicesList = remember { List(4) { mutableStateOf(emptyList<Int>()) } }
     val currentMatchIndices = remember { List(4) { mutableIntStateOf(0) } }
@@ -1861,7 +1858,16 @@ private fun ResponseSection(
                         IconButton(onClick = { isExpanded = false }) { Icon(Icons.Default.Close, null, tint = Color.White) }
                     }
                     // Recursive call but with isExpanded already being false for the nested one
-                    ResponseSection(response, onExtract, onPrettifyBody, metadata, statusCode, 0, showExtract, Modifier.weight(1f))
+                    ResponseSection(
+                        response = response,
+                        onExtract = onExtract,
+                        onPrettifyBody = onPrettifyBody,
+                        metadata = metadata,
+                        statusCode = statusCode,
+                        initialPage = 0,
+                        showExtract = showExtract,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
         }
