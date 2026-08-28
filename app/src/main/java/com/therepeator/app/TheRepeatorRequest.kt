@@ -90,13 +90,38 @@ enum class DecoderTransformType {
     JWT_DECODE
 }
 
+enum class IntruderStatus {
+    IDLE, RUNNING, PAUSED, STOPPED, CANCELLED, COMPLETED, FAILED
+}
+
+enum class InterceptMode {
+    ALL, IN_SCOPE, POST_PUT, JSON, NONE
+}
+
+@Serializable
+data class InterceptionSettings(
+    val mode: InterceptMode = InterceptMode.ALL,
+    val selectedHosts: Set<String> = emptySet()
+)
+
+@Serializable
+data class IntruderStats(
+    val totalPayloads: Int = 0,
+    val processedCount: Int = 0,
+    val successCount: Int = 0,
+    val errorCount: Int = 0,
+    val startTime: Long = 0,
+    val elapsedMillis: Long = 0,
+    val rps: Double = 0.0,
+    val currentIndex: Int = 0
+)
+
 @Serializable
 data class IntruderState(
     val templateRequest: String = "",
     val payloads: List<String> = emptyList(),
-    val results: List<IntruderResult> = emptyList(),
-    val isRunning: Boolean = false,
-    val isPaused: Boolean = false,
+    val status: IntruderStatus = IntruderStatus.IDLE,
+    val stats: IntruderStats = IntruderStats(),
     val concurrency: Int = 1,
     val rateLimitMillis: Long = 0,
     val rps: Int = 1,
@@ -104,7 +129,11 @@ data class IntruderState(
     val timeoutSeconds: Int = 30,
     val filters: IntruderFilters = IntruderFilters(),
     val encodeUrl: Boolean = false,
-    val decodeBase64: Boolean = false
+    val decodeBase64: Boolean = false,
+    val sortField: String = "Time",
+    val sortAscending: Boolean = false,
+    val lastProcessedIndex: Int = -1,
+    val payloadFileUri: String? = null,
 )
 
 @Serializable
@@ -112,16 +141,23 @@ data class IntruderFilters(
     val status: String = "",
     val minLength: Int? = null,
     val maxLength: Int? = null,
-    val regex: String = ""
+    val regex: String = "",
+    val excludeStatus: String = "",
+    val excludeLength: String = ""
 )
 
 @Serializable
+@Entity(tableName = "intruder_results")
 data class IntruderResult(
+    @PrimaryKey
     val id: String = java.util.UUID.randomUUID().toString(),
+    val attackId: String = "default",
+    val resultIndex: Int = 0,
     val payload: String,
     val statusCode: Int,
     val length: Int,
     val responseTime: Long,
+    val request: String = "",
     val response: String = "",
     val timestamp: Long = System.currentTimeMillis()
 )

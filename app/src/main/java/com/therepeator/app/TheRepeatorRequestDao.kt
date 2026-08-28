@@ -29,6 +29,24 @@ interface TheRepeatorRequestDao {
 }
 
 @Dao
+interface IntruderResultDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertResult(result: IntruderResult)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertResults(results: List<IntruderResult>)
+
+    @Query("SELECT * FROM intruder_results WHERE attackId = :attackId ORDER BY timestamp DESC LIMIT 1000")
+    fun getResultsForAttack(attackId: String): Flow<List<IntruderResult>>
+
+    @Query("DELETE FROM intruder_results WHERE attackId = :attackId")
+    suspend fun deleteResultsForAttack(attackId: String)
+
+    @Query("DELETE FROM intruder_results")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface BrowserHistoryDao {
     @Query("SELECT * FROM browser_history ORDER BY timestamp DESC")
     fun getAllHistory(): Flow<List<BrowserHistoryItem>>

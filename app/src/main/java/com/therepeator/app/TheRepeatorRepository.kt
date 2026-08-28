@@ -8,7 +8,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class TheRepeatorRepository(private val dao: TheRepeatorRequestDao, private val browserDao: BrowserHistoryDao) {
+class TheRepeatorRepository(
+    private val dao: TheRepeatorRequestDao, 
+    private val intruderDao: IntruderResultDao,
+    private val browserDao: BrowserHistoryDao
+) {
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     val history: Flow<List<HistoryItemSummary>> = dao.getAllRequestsSummary()
@@ -77,6 +81,22 @@ class TheRepeatorRepository(private val dao: TheRepeatorRequestDao, private val 
 
     suspend fun getRequestById(id: Int): TheRepeatorRequest? {
         return dao.getRequestById(id)
+    }
+
+    fun getIntruderResults(attackId: String): Flow<List<IntruderResult>> {
+        return intruderDao.getResultsForAttack(attackId)
+    }
+
+    suspend fun addIntruderResult(result: IntruderResult) {
+        intruderDao.insertResult(result)
+    }
+
+    suspend fun addIntruderResults(results: List<IntruderResult>) {
+        intruderDao.insertResults(results)
+    }
+
+    suspend fun clearIntruderResults(attackId: String) {
+        intruderDao.deleteResultsForAttack(attackId)
     }
 
     val browserHistory: Flow<List<BrowserHistoryItem>> = browserDao.getAllHistory()
