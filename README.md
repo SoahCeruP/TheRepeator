@@ -6,7 +6,7 @@ This project aims to bring a Burp-like workflow into a mobile-first interface, w
 
 > This project is intended for legal security testing, research, and development use only.
 
-![Logo](app/src/main/res/mipmap-mdpi/ic_app_logo.png)
+![Logo](app/src/main/res/mipmap-xxhdpi/ic_app_logo.png)
 
 ---
 ## Why this app?
