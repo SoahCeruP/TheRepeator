@@ -271,8 +271,8 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(false) // Give users choice in Repeater
-        .followSslRedirects(false)
+        .followRedirects(true) // Browser/Proxy should follow redirects
+        .followSslRedirects(true)
         .hostnameVerifier { _, _ -> true }
         .sslSocketFactory(
             createUnsafeSslSocketFactory(), 
@@ -284,6 +284,11 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
             },
         )
+        .build()
+
+    private val repeaterOkHttpClient = okHttpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     private val intruderOkHttpClient = okHttpClient.newBuilder()
@@ -415,7 +420,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun prettifyBody(body: String): String {
-        if (body.isBlank() || (body.length > 500_000)) return body
+        if (body.isBlank() || (body.length > 1_000_000)) return body
         val tb = body.trim()
         return try {
             if (tb.startsWith("{") || tb.startsWith("[")) {
@@ -1154,7 +1159,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                         null
                     }
                     
-                    val call = try { okHttpClient.newCall(builder.method(parsed.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) okHttpClient.newCall(builder.method(parsed.method, null).build()) else throw e }
+                    val call = try { repeaterOkHttpClient.newCall(builder.method(parsed.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) repeaterOkHttpClient.newCall(builder.method(parsed.method, null).build()) else throw e }
                     call.execute().use { resp ->
                         val rawBytes = resp.body?.bytes() ?: byteArrayOf()
                         val contentType = resp.header("Content-Type") ?: "text/html"

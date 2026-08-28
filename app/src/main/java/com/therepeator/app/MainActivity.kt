@@ -1924,7 +1924,7 @@ private fun RenderLargeText(
     currentMatchIndex: Int = 0,
     onMatchesFound: (List<Int>) -> Unit = {}
 ) {
-    val maxChars = if (isExpanded) 500_000 else 100_000
+    val maxChars = if (isExpanded) 1_000_000 else 200_000
     val isActuallyTruncated = text.length > maxChars
     
     val displayContent = remember(text, isExpanded) {
@@ -2413,7 +2413,7 @@ private fun ResponseSection(
 private val syntaxRegex = Regex("""(".*?")(\s*:)?|(\b\d+\b)|([{}\[\]])|(\btrue\b|\bfalse\b|\bnull\b)|(<[^>]+>)""")
 
 private fun highlightSyntax(line: String): AnnotatedString {
-    if (line.length > 2000) return AnnotatedString(line)
+    if (line.length > 5000) return AnnotatedString(line)
     return buildAnnotatedString {
         var start = 0
         val matches = syntaxRegex.findAll(line)
