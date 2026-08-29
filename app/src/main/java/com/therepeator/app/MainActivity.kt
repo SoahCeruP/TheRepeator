@@ -21,6 +21,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -49,6 +50,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -66,7 +68,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -528,7 +529,8 @@ private fun RepeaterTabWrapper(vm: TheRepeatorViewModel, selectedTabIndex: Int) 
             onFollowRedirect = { vm.followRedirect(it, followAll = true) }, onSend = { vm.sendRawRepeaterRequest(rawRepeaterValue.text) }, 
             onUndo = { vm.undoRepeater(tab.id) }, onRedo = { vm.redoRepeater(tab.id) }, onCancel = { vm.cancelRepeaterRequest(tab.id) },
             onToIntruder = { vm.sendToIntruder(it) },
-            onPrettifyBody = { vm.prettifyBody(it) }
+            onPrettifyBody = { vm.prettifyBody(it) },
+            onTogglePin = { vm.togglePinTab(it) }
         )
     }
 }
@@ -538,24 +540,11 @@ private fun IntruderTabWrapper(vm: TheRepeatorViewModel) {
     val intruderState by vm.intruderState.collectAsState()
     val filteredResults by vm.filteredIntruderResults.collectAsState()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     
     val payloadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { 
             vm.setIntruderPayloadFile(it.toString())
             try { context.contentResolver.takePersistableUriPermission(it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
-            scope.launch(Dispatchers.IO) {
-                try {
-                    context.contentResolver.openInputStream(it)?.use { stream ->
-                        val reader = stream.bufferedReader()
-                        var count = 0
-                        while (reader.readLine() != null) {
-                            count++
-                            if (count > 1000000) break
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
         }
     }
     
@@ -566,7 +555,7 @@ private fun IntruderTabWrapper(vm: TheRepeatorViewModel) {
         onCancel = { vm.cancelIntruderAttack() },
         onPause = { vm.pauseAttack() }, onResume = { vm.resumeAttack() },
         onSelectResult = { vm.selectIntruderResult(it) }, onSetSettings = { c, r, t, rd, eu, db, rps -> vm.setIntruderSettings(c, r, t, rd, eu, db, rps) },
-        onClearPayloads = { vm.clearIntruderPayloads() }, onSetFilters = { s, min, max, reg, es, el -> vm.setIntruderFilters(s, min, max, reg, es, el) },
+        onClearPayloads = { vm.clearIntruderPayloads() }, onSetFilters = { s, min, max, reg, es, el, ex -> vm.setIntruderFilters(s, min, max, reg, es, el, ex) },
         onUploadPayloads = { payloadLauncher.launch(arrayOf("*/*")) },
         onSort = { vm.sortIntruderResults(it) }
     )
@@ -690,25 +679,65 @@ private fun RepeaterTab(
     onRedo: (String) -> Unit,
     onCancel: (String) -> Unit,
     onToIntruder: (String) -> Unit,
-    onPrettifyBody: (String) -> String
+    onPrettifyBody: (String) -> String,
+    onTogglePin: (String) -> Unit
 ) {
     val tab = tabs.getOrNull(selectedTabIndex) ?: return
     var isRequestVisible by remember { mutableStateOf(true) }
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         ScrollableTabRow(selectedTabIndex = selectedTabIndex, edgePadding = 0.dp, containerColor = Color.Transparent, contentColor = Color(0xFF7C3AED), divider = {}) {
             tabs.forEachIndexed { index, t ->
-                Tab(selected = selectedTabIndex == index, onClick = { onTabSelected(index) }, text = { 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        var isEditingName by remember { mutableStateOf(false) }
-                        var newName by remember { mutableStateOf(t.name) }
-                        if (isEditingName) {
-                            BasicTextField(value = newName, onValueChange = { newName = it }, textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 10.sp), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { onTabRename(t.id, newName); isEditingName = false }), modifier = Modifier.width(40.dp))
-                        } else {
-                            Text(t.name, fontSize = 10.sp, modifier = Modifier.clickable { isEditingName = true })
+                Tab(
+                    selected = selectedTabIndex == index, 
+                    onClick = { onTabSelected(index) }, 
+                    text = { 
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.pointerInput(t.id) {
+                                detectTapGestures(
+                                    onDoubleTap = { /* handled by inner double tap */ }
+                                )
+                            }
+                        ) {
+                            var isEditingName by remember { mutableStateOf(false) }
+                            var newName by remember { mutableStateOf(t.name) }
+                            
+                            if (!t.isPinned) {
+                                IconButton(onClick = { onTabClose(t.id) }, modifier = Modifier.size(16.dp)) { 
+                                    Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(10.dp)) 
+                                }
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            
+                            if (isEditingName) {
+                                BasicTextField(
+                                    value = newName, 
+                                    onValueChange = { newName = it }, 
+                                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 10.sp), 
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), 
+                                    keyboardActions = KeyboardActions(onDone = { onTabRename(t.id, newName); isEditingName = false }), 
+                                    modifier = Modifier.width(60.dp).background(Color(0xFF1E293B), RoundedCornerShape(4.dp)).padding(2.dp)
+                                )
+                            } else {
+                                Text(
+                                    t.name, 
+                                    fontSize = 10.sp, 
+                                    modifier = Modifier.pointerInput(t.id) {
+                                        detectTapGestures(
+                                            onTap = { onTabSelected(index) },
+                                            onDoubleTap = { isEditingName = true }
+                                        )
+                                    }
+                                )
+                            }
+                            
+                            if (t.isPinned) {
+                                Spacer(Modifier.width(4.dp))
+                                Icon(Icons.Default.PushPin, null, tint = Color(0xFF7C3AED), modifier = Modifier.size(10.dp))
+                            }
                         }
-                        IconButton(onClick = { onTabClose(t.id) }, modifier = Modifier.size(16.dp)) { Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(10.dp)) }
                     }
-                })
+                )
             }
             IconButton(onClick = onAddTab) { Icon(Icons.Default.Add, null, tint = Color(0xFF7C3AED)) }
         }
@@ -718,9 +747,14 @@ private fun RepeaterTab(
                 else Text("Send", fontSize = 12.sp) 
             }
             if (tab.redirectUrl != null) { Button(onClick = { onFollowRedirect(tab.id) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E)), modifier = Modifier.height(36.dp)) { Text("Follow", fontSize = 12.sp) } }
-            IconButton(onClick = { onUndo(tab.id) }, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Undo, null, tint = Color.White) }
-            IconButton(onClick = { onRedo(tab.id) }, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.Redo, null, tint = Color.White) }
+            IconButton(onClick = { onUndo(tab.id) }, modifier = Modifier.size(20.dp)) { Icon(Icons.AutoMirrored.Filled.Undo, null, tint = Color.White) }
+            IconButton(onClick = { onRedo(tab.id) }, modifier = Modifier.size(20.dp)) { Icon(Icons.AutoMirrored.Filled.Redo, null, tint = Color.White) }
             IconButton(onClick = { onToIntruder(rawRequestValue.text) }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Bolt, "To Intruder", tint = Color(0xFF7C3AED)) }
+            
+            IconButton(onClick = { onTogglePin(tab.id) }, modifier = Modifier.size(20.dp)) {
+                Icon(if (tab.isPinned) Icons.Default.PushPin else Icons.Default.PushPin, "Toggle Pin", tint = if (tab.isPinned) Color(0xFF7C3AED) else Color.White) 
+            }
+            
             IconButton(onClick = { isRequestVisible = !isRequestVisible }, modifier = Modifier.size(36.dp)) { Icon(if (isRequestVisible) Icons.Default.ExpandLess else Icons.Default.ExpandMore, "Toggle Request", tint = Color.White) }
             if (tab.isLoading) { IconButton(onClick = { onCancel(tab.id) }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Cancel, null, tint = Color(0xFFEF4444)) } }
         }
@@ -761,7 +795,7 @@ private fun IntruderTab(
     onSelectResult: (IntruderResult) -> Unit,
     onSetSettings: (Int, Long, Int, Boolean, Boolean, Boolean, Int) -> Unit,
     onClearPayloads: () -> Unit,
-    onSetFilters: (String, Int?, Int?, String, String, String) -> Unit,
+    onSetFilters: (String, Int?, Int?, String, String, String, String) -> Unit,
     onUploadPayloads: () -> Unit,
     onSort: (String) -> Unit
 ) {
@@ -775,17 +809,17 @@ private fun IntruderTab(
     val isRunning = state.status == IntruderStatus.RUNNING
     val isPaused = state.status == IntruderStatus.PAUSED
 
-    Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+    Column(modifier = Modifier.fillMaxSize().padding(6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Intruder [${state.status}]", color = Color.White, fontWeight = FontWeight.Bold)
             Row {
                 IconButton(onClick = { 
                     val csv = results.joinToString("\n") { "${it.resultIndex},${it.payload},${it.statusCode},${it.length},${it.responseTime}" }
                     copyToClipboard(context, "Index,Payload,Status,Length,Time\n$csv")
-                }) { Icon(Icons.Default.ContentPasteGo, "Copy CSV", tint = Color(0xFF7C3AED)) }
-                IconButton(onClick = { showPayloadLibrary = true }) { Icon(Icons.AutoMirrored.Filled.LibraryBooks, "Payload Library", tint = Color.White) }
-                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, null, tint = Color.White) }
-                IconButton(onClick = { showFilters = true }) { Icon(Icons.Default.FilterAlt, null, tint = Color.White) }
+                }) { Icon(Icons.Default.ContentPasteGo, "Copy CSV", tint = Color(0xFF7C3AED), modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = { showPayloadLibrary = true }) { Icon(Icons.AutoMirrored.Filled.LibraryBooks, "Payload Library", tint = Color.White, modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
+                IconButton(onClick = { showFilters = true }) { Icon(Icons.Default.FilterAlt, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
             }
         }
 
@@ -920,6 +954,7 @@ private fun IntruderTab(
         var reg by remember { mutableStateOf(state.filters.regex) }
         var esc by remember { mutableStateOf(state.filters.excludeStatus) }
         var esz by remember { mutableStateOf(state.filters.excludeLength) }
+        var eext by remember { mutableStateOf(state.filters.excludeExtensions) }
         
         AlertDialog(
             onDismissRequest = { showFilters = false }, 
@@ -935,11 +970,12 @@ private fun IntruderTab(
                     Text("Exclusion", color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     OutlinedTextField(esc, { esc = it }, label = { Text("Exclude Status (e.g. 404, 500)") }, colors = darkCard)
                     OutlinedTextField(esz, { esz = it }, label = { Text("Exclude Size (e.g. 123, 456)") }, colors = darkCard)
+                    OutlinedTextField(eext, { eext = it }, label = { Text("Exclude Extensions (e.g. css, images)") }, colors = darkCard)
                 } 
             }, 
             confirmButton = { 
                 TextButton(onClick = { 
-                    onSetFilters(status, state.filters.minLength, state.filters.maxLength, reg, esc, esz)
+                    onSetFilters(status, state.filters.minLength, state.filters.maxLength, reg, esc, esz, eext)
                     showFilters = false 
                 }) { Text("Apply") } 
             }
@@ -1762,7 +1798,7 @@ private fun WebSocketTab(messages: List<WebSocketMessage>, state: String, onConn
 private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, onInputChange: (String) -> Unit, onAddStep: (DecoderTransformType) -> Unit, onRemoveStep: (String) -> Unit, onClear: () -> Unit, onSwap: () -> Unit, onCopy: (String) -> Unit, onMoveStep: (String, Boolean) -> Unit) {
     var showAddMenu by remember { mutableStateOf(false) }; val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("Decoder / Encoder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp); Row { IconButton(onClick = { val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""; onInputChange(clip) }) { Icon(Icons.Default.ContentPaste, "Paste", tint = Color(0xFF94A3B8)) }; IconButton(onClick = { onCopy(output) }) { Icon(Icons.Default.ContentCopy, "Copy", tint = Color(0xFF94A3B8)) }; IconButton(onClick = onClear) { Icon(Icons.Default.Clear, "Clear", tint = Color(0xFFEF4444)) } } }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("Decoder / Encoder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp); Row { IconButton(onClick = { val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""; onInputChange(clip) }) { Icon(Icons.Default.ContentPaste, "Paste", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = { onCopy(output) }) { Icon(Icons.Default.ContentCopy, "Copy", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = onClear) { Icon(Icons.Default.Clear, "Clear", tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp)) } } }
         OutlinedTextField(input, onInputChange, modifier = Modifier.fillMaxWidth().height(120.dp), label = { Text("Input") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp))
         Text("Transform Chain", color = Color(0xFF7C3AED), fontWeight = FontWeight.Bold, fontSize = 12.sp)
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) { 
@@ -1770,14 +1806,14 @@ private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, 
                 Card(colors = CardDefaults.cardColors(Color(0xFF1E293B)), modifier = Modifier.fillMaxWidth()) {
                     Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(step.type.name.replace("_", " "), color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { onMoveStep(step.id, true) }, enabled = index > 0) { Icon(Icons.Default.ArrowUpward, null, tint = if (index > 0) Color.White else Color.Gray, modifier = Modifier.size(16.dp)) }
-                        IconButton(onClick = { onMoveStep(step.id, false) }, enabled = index < steps.size - 1) { Icon(Icons.Default.ArrowDownward, null, tint = if (index < steps.size - 1) Color.White else Color.Gray, modifier = Modifier.size(16.dp)) }
-                        IconButton(onClick = { onRemoveStep(step.id) }) { Icon(Icons.Default.Close, null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp)) }
+                        IconButton(onClick = { onMoveStep(step.id, true) }, enabled = index > 0) { Icon(Icons.Default.ArrowUpward, null, tint = if (index > 0) Color.White else Color.Gray, modifier = Modifier.size(20.dp)) }
+                        IconButton(onClick = { onMoveStep(step.id, false) }, enabled = index < steps.size - 1) { Icon(Icons.Default.ArrowDownward, null, tint = if (index < steps.size - 1) Color.White else Color.Gray, modifier = Modifier.size(20.dp)) }
+                        IconButton(onClick = { onRemoveStep(step.id) }) { Icon(Icons.Default.Close, null, tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp)) }
                     }
                 }
             }
             Box { 
-                AssistChip(onClick = { showAddMenu = true }, label = { Text("Add Transform", fontSize = 10.sp) }, leadingIcon = { Icon(Icons.Default.Add, null, modifier = Modifier.size(14.dp)) }, colors = AssistChipDefaults.assistChipColors(labelColor = Color(0xFF7C3AED)))
+                AssistChip(onClick = { showAddMenu = true }, label = { Text("Add Transform", fontSize = 10.sp) }, leadingIcon = { Icon(Icons.Default.Add, null, modifier = Modifier.size(20.dp)) }, colors = AssistChipDefaults.assistChipColors(labelColor = Color(0xFF7C3AED)))
                 DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }, modifier = Modifier.background(Color(0xFF1E293B))) { 
                     DecoderTransformType.entries.forEach { type -> DropdownMenuItem(text = { Text(type.name.replace("_", " "), color = Color.White, fontSize = 12.sp) }, onClick = { onAddStep(type); showAddMenu = false }) } 
                 } 
@@ -1924,7 +1960,7 @@ private fun RenderLargeText(
     currentMatchIndex: Int = 0,
     onMatchesFound: (List<Int>) -> Unit = {}
 ) {
-    val maxChars = if (isExpanded) 1_000_000 else 200_000
+    val maxChars = if (isExpanded) 10_000_000 else 2_000_000
     val isActuallyTruncated = text.length > maxChars
     
     val displayContent = remember(text, isExpanded) {
@@ -1935,22 +1971,45 @@ private fun RenderLargeText(
         displayContent.split("\n")
     }
     
-    val matchIndices = remember(lines, searchQuery) {
+    // Find all occurrences within lines
+    val matchOccurrences = remember(lines, searchQuery) {
         if (searchQuery.isEmpty()) emptyList()
-        else lines.mapIndexedNotNull { index, line -> if (line.contains(searchQuery, ignoreCase = true)) index else null }
-    }
-
-    LaunchedEffect(matchIndices) {
-        onMatchesFound(matchIndices)
-    }
-
-    LaunchedEffect(currentMatchIndex, matchIndices) {
-        if (matchIndices.isNotEmpty() && currentMatchIndex in matchIndices.indices) {
-            listState.animateScrollToItem(matchIndices[currentMatchIndex])
+        else {
+            val list = mutableListOf<Pair<Int, Int>>()
+            lines.forEachIndexed { lineIdx, line ->
+                var start = 0
+                while (true) {
+                    val found = line.indexOf(searchQuery, start, ignoreCase = true)
+                    if (found == -1) break
+                    list.add(lineIdx to found)
+                    start = found + searchQuery.length
+                }
+            }
+            list
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    LaunchedEffect(matchOccurrences) {
+        // Return only the distinct line indices for external scrolling logic if needed,
+        // but for internal display we use the full list size.
+        onMatchesFound(List(matchOccurrences.size) { it }) 
+    }
+
+    LaunchedEffect(currentMatchIndex, matchOccurrences) {
+        if (matchOccurrences.isNotEmpty() && currentMatchIndex in matchOccurrences.indices) {
+            val (lineIdx, _) = matchOccurrences[currentMatchIndex]
+            listState.animateScrollToItem(lineIdx)
+        }
+    }
+
+    val showScrollToBottom by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex < maxOf(0, lines.size - 10)
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
         if (isActuallyTruncated) {
             Card(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -1968,7 +2027,7 @@ private fun RenderLargeText(
             }
         }
 
-        val useSyntaxHighlighting = displayContent.length < 1_000_000
+        val useSyntaxHighlighting = displayContent.length < 10_000_000
         
         SelectionContainer { 
             LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
@@ -1978,20 +2037,25 @@ private fun RenderLargeText(
                     }
                     
                     if (searchQuery.isNotEmpty() && displayLine.contains(searchQuery, ignoreCase = true)) {
-                        val isCurrentMatchLine = matchIndices.getOrNull(currentMatchIndex) == index
-                        val annotatedString = remember(displayLine, searchQuery, isCurrentMatchLine) {
+                        val annotatedString = remember(displayLine, searchQuery, currentMatchIndex, matchOccurrences) {
                             buildAnnotatedString {
-                                var startMatch = 0
-                                while (startMatch < displayLine.length) {
-                                    val matchIdx = displayLine.indexOf(searchQuery, startMatch, ignoreCase = true)
-                                    if (matchIdx == -1) { append(displayLine.substring(startMatch)); break }
-                                    append(displayLine.substring(startMatch, matchIdx))
-                                    val bgColor = if (isCurrentMatchLine) Color(0xFF7C3AED) else Color(0xFFFACC15).copy(alpha = 0.8f)
-                                    val textColor = if (isCurrentMatchLine) Color.White else Color.Black
+                                var start = 0
+                                var matchInLineIdx = 0
+                                while (start < displayLine.length) {
+                                    val matchIdx = displayLine.indexOf(searchQuery, start, ignoreCase = true)
+                                    if (matchIdx == -1) { append(displayLine.substring(start)); break }
+                                    append(displayLine.substring(start, matchIdx))
+                                    
+                                    // Check if this specific occurrence is the one selected
+                                    val isCurrentGlobal = matchOccurrences.getOrNull(currentMatchIndex) == (index to matchIdx)
+                                    
+                                    val bgColor = if (isCurrentGlobal) Color(0xFF7C3AED) else Color(0xFFFACC15).copy(alpha = 0.8f)
+                                    val textColor = if (isCurrentGlobal) Color.White else Color.Black
                                     withStyle(style = SpanStyle(background = bgColor, color = textColor)) {
                                         append(displayLine.substring(matchIdx, matchIdx + searchQuery.length))
                                     }
-                                    startMatch = matchIdx + searchQuery.length
+                                    start = matchIdx + searchQuery.length
+                                    matchInLineIdx++
                                 }
                             }
                         }
@@ -2030,6 +2094,25 @@ private fun RenderLargeText(
                 Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Copy Full")
+            }
+        }
+        }
+
+        if (showScrollToBottom && isExpanded) {
+            val scope = rememberCoroutineScope()
+            SmallFloatingActionButton(
+                onClick = { 
+                    scope.launch { 
+                        if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1) 
+                    } 
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 100.dp, end = 20.dp),
+                containerColor = Color(0xFF7C3AED).copy(alpha = 0.9f),
+                contentColor = Color.White
+            ) {
+                Icon(Icons.Default.KeyboardDoubleArrowDown, null, modifier = Modifier.size(20.dp))
             }
         }
     }
@@ -2132,7 +2215,7 @@ private fun HistoryDetailView(
                             )
                         } else {
                             ResponseSection(
-                                response = vm.getRawResponse(detail!!),
+                                response = vm.getRawResponse(detail),
                                 onExtract = { /* Handle if needed */ },
                                 onPrettifyBody = { vm.prettifyBody(it) },
                                 statusCode = detail.statusCode,
@@ -2150,34 +2233,40 @@ private fun HistoryDetailView(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(8.dp)
-                        .then(if (isExpandedFull) Modifier.navigationBarsPadding() else Modifier),
+                        .background(Color(0xFF111827))
+                        .padding(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(onClick = { 
-                        vm.addRepeaterTab("H", vm.getRawFromTheRepeatorRequest(detail!!))
+                        vm.addRepeaterTab("H", vm.getRawFromTheRepeatorRequest(detail))
                         android.widget.Toast.makeText(context, "Sent to Repeater", android.widget.Toast.LENGTH_SHORT).show()
                         if (isExpandedFull) isExpandedFull = false else onBack() 
                     }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("To Repeater", fontSize = 12.sp) }
                     Button(onClick = { 
-                        vm.sendToIntruder(vm.getRawFromTheRepeatorRequest(detail!!))
+                        vm.sendToIntruder(vm.getRawFromTheRepeatorRequest(detail))
                         android.widget.Toast.makeText(context, "Sent to Intruder", android.widget.Toast.LENGTH_SHORT).show()
                         if (isExpandedFull) isExpandedFull = false else onBack() 
                     }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Intruder", fontSize = 12.sp) }
                     Button(onClick = { 
-                        vm.sendHistoryToComparerSmart(detail!!.id)
+                        vm.sendHistoryToComparerSmart(detail.id)
                         android.widget.Toast.makeText(context, "Sent to Comparer", android.widget.Toast.LENGTH_SHORT).show()
                         if (isExpandedFull) isExpandedFull = false else onBack() 
                     }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Comparer", fontSize = 12.sp) }
                 }
+                Spacer(Modifier.navigationBarsPadding())
             }
         }
     }
 
     if (isExpandedFull) {
         Dialog(onDismissRequest = { isExpandedFull = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0B1020)) {
-                MainContent(modifier = Modifier.systemBarsPadding())
+            Scaffold(
+                containerColor = Color(0xFF0B1020),
+                contentWindowInsets = WindowInsets.systemBars
+            ) { padding ->
+                Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+                    MainContent()
+                }
             }
         }
     } else {
@@ -2386,8 +2475,11 @@ private fun ResponseSection(
             onDismissRequest = { internalIsExpanded = false },
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
-            Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0B1020)) {
-                Column(modifier = Modifier.systemBarsPadding()) {
+            Scaffold(
+                containerColor = Color(0xFF0B1020),
+                contentWindowInsets = WindowInsets.systemBars
+            ) { padding ->
+                Column(modifier = Modifier.padding(padding).fillMaxSize()) {
                     Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("Response Full View", color = Color.White, fontWeight = FontWeight.Bold)
                         IconButton(onClick = { internalIsExpanded = false }) { Icon(Icons.Default.Close, null, tint = Color.White) }
@@ -2404,6 +2496,7 @@ private fun ResponseSection(
                         onToggleFullscreen = { internalIsExpanded = false },
                         modifier = Modifier.weight(1f)
                     )
+                    Spacer(Modifier.navigationBarsPadding())
                 }
             }
         }

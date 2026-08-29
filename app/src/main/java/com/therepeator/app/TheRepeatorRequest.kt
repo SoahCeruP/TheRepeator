@@ -60,7 +60,8 @@ data class RepeaterTabState(
     val history: List<String> = emptyList(),
     val historyIndex: Int = -1,
     val isLoading: Boolean = false,
-    val metadata: ResponseMetadata? = null
+    val metadata: ResponseMetadata? = null,
+    val isPinned: Boolean = false
 )
 
 @Serializable
@@ -91,7 +92,7 @@ enum class DecoderTransformType {
 }
 
 enum class IntruderStatus {
-    IDLE, RUNNING, PAUSED, STOPPED, CANCELLED, COMPLETED, FAILED
+    IDLE, RUNNING, PAUSED, CANCELLED, COMPLETED, FAILED
 }
 
 enum class InterceptMode {
@@ -143,7 +144,8 @@ data class IntruderFilters(
     val maxLength: Int? = null,
     val regex: String = "",
     val excludeStatus: String = "",
-    val excludeLength: String = ""
+    val excludeLength: String = "",
+    val excludeExtensions: String = ""
 )
 
 @Serializable
@@ -176,8 +178,6 @@ data class WebSocketMessage(
 enum class MessageDirection {
     SENT, RECEIVED
 }
-
-data class AppInfo(val name: String, val packageName: String)
 
 data class InterceptedBrowserRequest(
     val id: String,

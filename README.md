@@ -91,4 +91,7 @@ You can find the latest stable APK in the [Releases](https://github.com/SoahCeru
 
 
 #### * Contributions are always welcomed
+
+> Warning: this app was designed for humans with normal-sized thumbs.
+
 ---

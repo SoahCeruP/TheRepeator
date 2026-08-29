@@ -174,7 +174,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     private val _hasNewRepeaterItem = MutableStateFlow(value = false)
     val hasNewRepeaterItem: StateFlow<Boolean> = _hasNewRepeaterItem.asStateFlow()
 
-    private val _hasNewIntruderItem = MutableStateFlow(false)
+    private val _hasNewIntruderItem = MutableStateFlow(value = false)
     val hasNewIntruderItem: StateFlow<Boolean> = _hasNewIntruderItem.asStateFlow()
 
     private val _intruderState = MutableStateFlow(IntruderState())
@@ -225,7 +225,19 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 res.length !in excludedLengths
             }
             
-            statusOk && minOk && maxOk && regexOk && excludeStatusOk && excludeLengthOk
+            val excludeExtOk = if (f.excludeExtensions.isEmpty()) true else {
+                val exts = f.excludeExtensions.split(",").map { it.trim().lowercase() }
+                val reqUrl = try { res.request.split("\n")[0].split(" ")[1] } catch(_: Exception) { "" }
+                val path = reqUrl.substringBefore("?").lowercase()
+                exts.none { ext -> 
+                    when (ext) {
+                        "images" -> path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".ico")
+                        else -> path.endsWith(".$ext")
+                    }
+                }
+            }
+            
+            statusOk && minOk && maxOk && regexOk && excludeStatusOk && excludeLengthOk && excludeExtOk
         }
         
         val sorted = when (sortField) {
@@ -325,6 +337,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         _selectedTabIndex.value = index 
     }
 
+    fun togglePinTab(id: String) {
+        _repeaterTabs.value = _repeaterTabs.value.map { if (it.id == id) it.copy(isPinned = !it.isPinned) else it }
+    }
+
     fun selectBottomTab(index: Int) {
         _selectedBottomTab.value = index
         if (index == 0) _hasNewRepeaterItem.value = false
@@ -402,7 +418,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         updateTabLoading(tabId, loading = false) 
     }
 
-    private val jsonPretty = Json { prettyPrint = true; ignoreUnknownKeys = true }
+    private val jsonPretty = Json { prettyPrint = true; ignoreUnknownKeys = true; isLenient = true }
 
     @Suppress("unused")
     fun prettifyCurrentResponse() {
@@ -420,7 +436,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun prettifyBody(body: String): String {
-        if (body.isBlank() || (body.length > 1_000_000)) return body
+        if (body.isBlank() || (body.length > 2_000_000)) return body
         val tb = body.trim()
         return try {
             if (tb.startsWith("{") || tb.startsWith("[")) {
@@ -429,11 +445,24 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             } else if (tb.startsWith("<")) {
                 prettifyXmlHtml(tb)
             } else {
-                val firstBrace = tb.indexOfFirst { (it == '{') || (it == '[') }
-                if (firstBrace != -1) {
-                    val possibleJson = tb.substring(firstBrace)
-                    val jsonElement = jsonPretty.parseToJsonElement(possibleJson)
-                    tb.substring(0, firstBrace) + "\n" + jsonPretty.encodeToString(jsonElement)
+                // Improved JSON detection for embedded JSON
+                val firstBrace = tb.indexOf('{')
+                val firstBracket = tb.indexOf('[')
+                val startIdx = when {
+                    (firstBrace != -1) && (firstBracket != -1) -> minOf(firstBrace, firstBracket)
+                    firstBrace != -1 -> firstBrace
+                    firstBracket != -1 -> firstBracket
+                    else -> -1
+                }
+                
+                if (startIdx != -1) {
+                    val possibleJson = tb.substring(startIdx)
+                    try {
+                        val jsonElement = jsonPretty.parseToJsonElement(possibleJson)
+                        tb.substring(0, startIdx) + "\n" + jsonPretty.encodeToString(jsonElement)
+                    } catch (_: Exception) {
+                        if (tb.startsWith("<")) prettifyXmlHtml(tb) else body
+                    }
                 } else body
             }
         } catch (_: Exception) { body }
@@ -478,8 +507,8 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         ) }
     }
 
-    fun setIntruderFilters(status: String, min: Int?, max: Int?, regex: String, excludeStatus: String = "", excludeLength: String = "") {
-        _intruderState.update { it.copy(filters = IntruderFilters(status, min, max, regex, excludeStatus, excludeLength)) }
+    fun setIntruderFilters(status: String, min: Int?, max: Int?, regex: String, excludeStatus: String = "", excludeLength: String = "", excludeExtensions: String = "") {
+        _intruderState.update { it.copy(filters = IntruderFilters(status, min, max, regex, excludeStatus, excludeLength, excludeExtensions)) }
     }
 
     fun setIntruderPayloadFile(uri: String) {
@@ -697,7 +726,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                                     try {
                                         // Standard URLEncoder encodes space as + which is for form-data. 
                                         // Most users expect %20 and full encoding of special chars.
-                                        payload = java.net.URLEncoder.encode(payload, "UTF-8").replace("+", "%20")
+                                        payload = URLEncoder.encode(payload, "UTF-8").replace("+", "%20")
                                     } catch (_: Exception) {
                                         android.util.Log.e("Intruder", "URL encode failed for: $payload")
                                     }
@@ -720,7 +749,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                                 
                                 try {
                                     val parsed = parseRawRequest(finalReq)
-                                    val builder = okhttp3.Request.Builder().url(parsed.url)
+                                    val builder = Request.Builder().url(parsed.url)
                                     parsed.headers.forEach { (k, v) -> 
                                         val lowerK = k.lowercase()
                                         if (lowerK != "host" && lowerK != "content-length") {
@@ -734,13 +763,13 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                                     intruderOkHttpClient.newCall(builder.method(parsed.method, reqBody).build()).execute().use { resp ->
                                         val rb = resp.body?.string() ?: ""
                                         val storedResponse = if (rb.length > 200_000) rb.take(200_000) + "\n\n[... RESPONSE TRUNCATED IN STORAGE ...]" else rb
-                                        val result = IntruderResult(id = java.util.UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = resp.code, length = rb.length, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "HTTP ${resp.code}\n${resp.headers}\n$storedResponse")
+                                        val result = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = resp.code, length = rb.length, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "HTTP ${resp.code}\n${resp.headers}\n$storedResponse")
                                         if (isActive) {
                                             resultsChannel.send(result)
                                         }
                                     }
                                 } catch (e: Exception) {
-                                    val errResult = IntruderResult(id = java.util.UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = 0, length = 0, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "Error: ${e.message}")
+                                    val errResult = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = 0, length = 0, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "Error: ${e.message}")
                                     if (isActive) {
                                         resultsChannel.send(errResult)
                                     }
@@ -1268,10 +1297,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         // Smarter URL reconstruction
         var finalUrl = rawUrl
         if (!finalUrl.startsWith("http://") && !finalUrl.startsWith("https://")) {
-            if (hostHeader != null) {
+            finalUrl = if (hostHeader != null) {
                 val scheme = if (hostHeader.contains(":80") || finalUrl.contains(":80")) "http" else "https"
                 // Check if rawUrl already contains the host (e.g. "google.com/")
-                finalUrl = if (finalUrl.startsWith(hostHeader)) {
+                if (finalUrl.startsWith(hostHeader)) {
                     "$scheme://$finalUrl"
                 } else {
                     val cleanPath = if (finalUrl.startsWith("/")) finalUrl else "/$finalUrl"
