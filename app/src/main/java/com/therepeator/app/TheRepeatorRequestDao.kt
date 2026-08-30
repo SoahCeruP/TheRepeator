@@ -4,7 +4,6 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -14,9 +13,6 @@ interface TheRepeatorRequestDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRequest(request: TheRepeatorRequest): Long
-
-    @Update
-    suspend fun updateRequest(request: TheRepeatorRequest)
 
     @Query("DELETE FROM requests")
     suspend fun deleteAll()
@@ -30,9 +26,6 @@ interface TheRepeatorRequestDao {
 
 @Dao
 interface IntruderResultDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertResult(result: IntruderResult)
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertResults(results: List<IntruderResult>)
 

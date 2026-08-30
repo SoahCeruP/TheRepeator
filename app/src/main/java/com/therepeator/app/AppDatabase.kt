@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import net.sqlcipher.database.SupportFactory
+import net.sqlcipher.database.SQLiteDatabase
 
 @Database(entities = [TheRepeatorRequest::class, BrowserHistoryItem::class, IntruderResult::class], version = 5, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
@@ -17,11 +19,16 @@ abstract class AppDatabase : RoomDatabase() {
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
+                SQLiteDatabase.loadLibs(context)
+                val passphrase = SQLiteDatabase.getBytes("therepeator_secure_key_2026".toCharArray())
+                val factory = SupportFactory(passphrase)
+                
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "therepeator_database"
+                    "therepeator_encrypted_database"
                 )
+                .openHelperFactory(factory)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

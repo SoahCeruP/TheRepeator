@@ -2,9 +2,12 @@ package com.therepeator.app
 
 import android.annotation.SuppressLint
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
+import android.os.PersistableBundle
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -50,6 +53,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
@@ -68,8 +72,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import java.net.URL
 import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,7 +91,7 @@ class MainActivity : ComponentActivity() {
 private fun formatSize(size: Int): String {
     return when {
         size < 1024 -> "$size B"
-        size < 1024 * 1024 -> String.format(Locale.US, "%.1f KB", size / 1024.0)
+        size < (1024 * 1024) -> String.format(Locale.US, "%.1f KB", size / 1024.0)
         else -> String.format(Locale.US, "%.1f MB", size / (1024.0 * 1024.0))
     }
 }
@@ -115,7 +121,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var showSettings by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(value = false) }
     var showBrowserHistory by remember { mutableStateOf(false) }
     var showInterceptSettings by remember { mutableStateOf(false) }
     var sendToDecoderText by remember { mutableStateOf<String?>(null) }
@@ -137,8 +143,26 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 setSupportZoom(true)
                 builtInZoomControls = true
                 displayZoomControls = false
+                
+                // Allow mixed content for testing sites with HTTP resources
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                
+                // Security Hardening
+                allowFileAccess = false
+                allowContentAccess = false
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = false
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = false
+                
                 userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
             }
+            
+            // Handle cookies properly
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            cookieManager.setAcceptThirdPartyCookies(this, true)
+
             webChromeClient = object : android.webkit.WebChromeClient() { 
                 override fun onProgressChanged(view: WebView?, newProgress: Int) { 
                     loadProgress = newProgress 
@@ -155,12 +179,17 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 }
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                     return request?.let { req -> 
-                        kotlinx.coroutines.runBlocking { vm.handleBrowserTraffic(req.method, req.url.toString(), req.requestHeaders) } 
+                        runBlocking { vm.handleBrowserTraffic(req.method, req.url.toString(), req.requestHeaders) } 
                     } ?: super.shouldInterceptRequest(view, request)
                 }
                 @SuppressLint("WebViewClientOnReceivedSslError")
                 override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: android.net.http.SslError?) {
-                    handler?.proceed() 
+                    val host = try { URL(view?.url).host } catch(_: Exception) { "" }
+                    if (vm.authorizedInsecureDomains.value.contains(host)) {
+                        handler?.proceed() 
+                    } else {
+                        super.onReceivedSslError(view, handler, error)
+                    }
                 }
             }
             loadUrl("about:blank")
@@ -183,7 +212,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                                 painter = painterResource(id = R.mipmap.ic_app_logo),
                                 contentDescription = null,
                                 tint = Color.Unspecified,
-                                modifier = Modifier.size(48.dp)
+                                modifier = Modifier.size(48.dp),
                             )
                             Spacer(Modifier.width(12.dp))
                             Text("TheRepeator", style = MaterialTheme.typography.headlineSmall, color = Color.White, fontWeight = FontWeight.Bold)
@@ -260,7 +289,14 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     ) {
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            topBar = { if (selectedTab != 5) TopHeaderBar(onMenuClick = { scope.launch { drawerState.open() } }, onSettings = { showSettings = true }) },
+            topBar = { 
+                if (selectedTab != 5) {
+                    TopHeaderBar(
+                        onMenuClick = { scope.launch { drawerState.open() } }, 
+                        onSettings = { showSettings = true }
+                    ) 
+                }
+            },
             bottomBar = { 
                 BottomBarTabs(
                     selectedTab = selectedTab, 
@@ -272,7 +308,8 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
         ) { padding ->
             Surface(modifier = Modifier.padding(padding).fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 when (selectedTab) {
-                    0 -> RepeaterTabWrapper(vm, selectedTabIndex)
+                    0 ->
+                        RepeaterTabWrapper(vm, selectedTabIndex)
                     1 -> IntruderTabWrapper(vm)
                     2 -> DecoderTabWrapper(vm, context)
                     3 -> WebSocketTabWrapper(vm)
@@ -525,7 +562,7 @@ private fun RepeaterTabWrapper(vm: TheRepeatorViewModel, selectedTabIndex: Int) 
         RepeaterTab(
             tabs = repeaterTabs, selectedTabIndex = selectedTabIndex, rawRequestValue = rawRepeaterValue,
             onTabSelected = { vm.selectTab(it) }, onTabClose = { vm.closeTab(it) }, onTabRename = { id, n -> vm.renameTab(id, n) }, onAddTab = { vm.addEmptyRepeaterTab() },
-            onRawRequestChange = { rawRepeaterValue = it; vm.updateCurrentTabRequest(it.text); if (it.selection.length > 0) vm.tryDecodeBase64(it.text.substring(it.selection.start, it.selection.end)) },
+            onRawRequestChange = { rawRepeaterValue = it; vm.updateCurrentTabRequest(it.text) },
             onFollowRedirect = { vm.followRedirect(it, followAll = true) }, onSend = { vm.sendRawRepeaterRequest(rawRepeaterValue.text) }, 
             onUndo = { vm.undoRepeater(tab.id) }, onRedo = { vm.redoRepeater(tab.id) }, onCancel = { vm.cancelRepeaterRequest(tab.id) },
             onToIntruder = { vm.sendToIntruder(it) },
@@ -566,7 +603,8 @@ private fun DecoderTabWrapper(vm: TheRepeatorViewModel, context: Context) {
     val decoderInput by vm.decoderInput.collectAsState()
     val decoderOutput by vm.decoderOutput.collectAsState()
     val decoderSteps by vm.decoderSteps.collectAsState()
-    DecoderTab(input = decoderInput, output = decoderOutput, steps = decoderSteps, onInputChange = { vm.updateDecoderInput(it) }, onAddStep = { vm.addDecoderStep(it) }, onRemoveStep = { vm.removeDecoderStep(it) }, onClear = { vm.clearDecoder() }, onSwap = { vm.swapDecoder() }, onCopy = { copyToClipboard(context, it) }, onMoveStep = { id, up -> vm.moveDecoderStep(id, up) })
+    val scope = rememberCoroutineScope()
+    DecoderTab(input = decoderInput, output = decoderOutput, steps = decoderSteps, onInputChange = { vm.updateDecoderInput(it) }, onAddStep = { vm.addDecoderStep(it) }, onRemoveStep = { vm.removeDecoderStep(it) }, onClear = { vm.clearDecoder() }, onSwap = { vm.swapDecoder() }, onCopy = { copyToClipboard(context, it, scope) }, onMoveStep = { id, up -> vm.moveDecoderStep(id, up) })
 }
 
 @Composable
@@ -583,6 +621,7 @@ private fun HistoryTabWrapper(vm: TheRepeatorViewModel, context: Context) {
     val onlyShowInScope by vm.onlyShowInScope.collectAsState()
     val historySearchQuery by vm.historySearchQuery.collectAsState()
     val sortField by vm.historySortField.collectAsState()
+    val sortAscending by vm.historySortAscending.collectAsState()
     val selectedHistoryDetails by vm.selectedHistoryRequestDetails.collectAsState()
     
     var showDetail by remember { mutableStateOf(false) }
@@ -609,6 +648,7 @@ private fun HistoryTabWrapper(vm: TheRepeatorViewModel, context: Context) {
             searchQuery = historySearchQuery, onSearchChange = { vm.updateHistorySearch(it) }, 
             onItemClick = { summary = it; showDetail = true; vm.loadHistoryDetails(it.id) }, 
             onSort = { vm.setHistorySort(it) }, currentSortField = sortField, 
+            sortAscending = sortAscending,
             onGetType = { vm.inferContentType(it) }
         )
     }
@@ -629,7 +669,7 @@ private fun ComparerTabWrapper(vm: TheRepeatorViewModel) {
     ComparerTab(text1, text2, onText1Change = { vm.updateComparerText1(it) }, onText2Change = { vm.updateComparerText2(it) })
 }
 
-private fun copyToClipboard(context: Context, text: String) { 
+private fun copyToClipboard(context: Context, text: String, scope: CoroutineScope) { 
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val safeText = if (text.length > 100_000) {
         android.widget.Toast.makeText(context, "Content truncated for clipboard (100KB limit)", android.widget.Toast.LENGTH_SHORT).show()
@@ -637,7 +677,27 @@ private fun copyToClipboard(context: Context, text: String) {
     } else {
         text
     }
-    clipboard.setPrimaryClip(ClipData.newPlainText("TheRepeator HTTP", safeText)) 
+    val clipData = ClipData.newPlainText("TheRepeator HTTP", safeText)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clipData.description.extras = PersistableBundle().apply {
+            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        }
+    }
+    clipboard.setPrimaryClip(clipData)
+    
+    // Auto-clear clipboard after 60 seconds for security
+    scope.launch {
+        delay(60.seconds)
+        val currentClip = clipboard.primaryClip
+        if (currentClip != null && currentClip.itemCount > 0 && currentClip.getItemAt(0).text == safeText) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                clipboard.clearPrimaryClip()
+            } else {
+                clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+            android.widget.Toast.makeText(context, "Clipboard cleared for security", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
 }
 
 @Composable
@@ -658,7 +718,13 @@ private fun TopHeaderBar(onMenuClick: () -> Unit, onSettings: () -> Unit) {
                     Text("TheRepeator", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
                 } 
             }
-            IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Settings, "Settings", tint = Color(0xFF94A3B8), modifier = Modifier.size(22.dp)) }
+            IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) { 
+                Icon(
+                    Icons.Default.Settings, "Settings", 
+                    tint = Color(0xFF94A3B8), 
+                    modifier = Modifier.size(22.dp)
+                ) 
+            }
         }
     }
 }
@@ -703,8 +769,17 @@ private fun RepeaterTab(
                             var newName by remember { mutableStateOf(t.name) }
                             
                             if (!t.isPinned) {
-                                IconButton(onClick = { onTabClose(t.id) }, modifier = Modifier.size(16.dp)) { 
-                                    Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(10.dp)) 
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .pointerInput(t.id) {
+                                            detectTapGestures(
+                                                onTap = { onTabClose(t.id) }
+                                            )
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) { 
+                                    Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(14.dp)) 
                                 }
                                 Spacer(Modifier.width(4.dp))
                             }
@@ -777,7 +852,8 @@ private fun RepeaterTab(
             metadata = tab.metadata,
             statusCode = if (tab.response.startsWith("HTTP")) tab.response.split(" ").getOrNull(1)?.toIntOrNull() else null,
             showExtract = false,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f),
+            showCopyFull = false
         )
     }
 }
@@ -800,7 +876,7 @@ private fun IntruderTab(
     onSort: (String) -> Unit
 ) {
     val context = LocalContext.current
-    var showSettings by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(value = false) }
     var showFilters by remember { mutableStateOf(false) }
     var showPayloadLibrary by remember { mutableStateOf(false) }
     var payloadText by remember { mutableStateOf(state.payloads.joinToString("\n")) }
@@ -808,6 +884,13 @@ private fun IntruderTab(
     
     val isRunning = state.status == IntruderStatus.RUNNING
     val isPaused = state.status == IntruderStatus.PAUSED
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(state.sortField, state.sortAscending) {
+        if (results.isNotEmpty()) {
+            listState.scrollToItem(0)
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -815,7 +898,9 @@ private fun IntruderTab(
             Row {
                 IconButton(onClick = { 
                     val csv = results.joinToString("\n") { "${it.resultIndex},${it.payload},${it.statusCode},${it.length},${it.responseTime}" }
-                    copyToClipboard(context, "Index,Payload,Status,Length,Time\n$csv")
+                    // Using a global-like scope for simple clipboard cleanup
+                    val scope = MainScope()
+                    copyToClipboard(context, "Index,Payload,Status,Length,Time\n$csv", scope)
                 }) { Icon(Icons.Default.ContentPasteGo, "Copy CSV", tint = Color(0xFF7C3AED), modifier = Modifier.size(20.dp)) }
                 IconButton(onClick = { showPayloadLibrary = true }) { Icon(Icons.AutoMirrored.Filled.LibraryBooks, "Payload Library", tint = Color.White, modifier = Modifier.size(20.dp)) }
                 IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
@@ -913,7 +998,7 @@ private fun IntruderTab(
             }
         }
 
-        LazyColumn(modifier = Modifier.weight(1f)) {
+        LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
             item { 
                 Row(modifier = Modifier.fillMaxWidth().background(Color(0xFF1E293B)).padding(4.dp)) { 
                     Text("ID", modifier = Modifier.width(40.dp).clickable { onSort("Time") }, color = Color.Gray, fontSize = 10.sp)
@@ -1102,6 +1187,7 @@ private fun HistoryTab(
     onItemClick: (HistoryItemSummary) -> Unit,
     onSort: (String) -> Unit,
     currentSortField: String,
+    sortAscending: Boolean,
     onGetType: (HistoryItemSummary) -> String
 ) {
     val filterTypes = listOf("JS", "XML", "JSON", "Images", "HTML", "Text")
@@ -1113,7 +1199,7 @@ private fun HistoryTab(
     var areFiltersVisible by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(history.size, currentSortField) {
+    LaunchedEffect(currentSortField, sortAscending) {
         if (history.isNotEmpty()) {
             listState.scrollToItem(0)
         }
@@ -1374,6 +1460,7 @@ private fun BrowserTab(
 ) {
     var urlText by remember { mutableStateOf(if (webView.url == "about:blank") "" else (webView.url ?: "")) }
     var isUrlBarVisible by remember { mutableStateOf(true) }
+    var isUrlFocused by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1420,9 +1507,11 @@ private fun BrowserTab(
         Column(modifier = Modifier.fillMaxSize()) {
             AnimatedVisibility(visible = isUrlBarVisible) {
                 Row(modifier = Modifier.fillMaxWidth().background(Color(0xFF111827)).statusBarsPadding().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { if (webView.canGoBack()) webView.goBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
-                    IconButton(onClick = { webView.reload() }) { Icon(Icons.Default.Refresh, "Refresh", tint = Color(0xFF94A3B8)) }
-                    IconButton(onClick = { if (webView.canGoForward()) webView.goForward() }) { Icon(Icons.AutoMirrored.Filled.ArrowForward, "Forward", tint = Color.White) }
+                    if (!isUrlFocused) {
+                        IconButton(onClick = { if (webView.canGoBack()) webView.goBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(20.dp)) }
+                        IconButton(onClick = { webView.reload() }) { Icon(Icons.Default.Refresh, "Refresh", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }
+                        IconButton(onClick = { if (webView.canGoForward()) webView.goForward() }) { Icon(Icons.AutoMirrored.Filled.ArrowForward, "Forward", tint = Color.White, modifier = Modifier.size(20.dp)) }
+                    }
                     Box(modifier = Modifier.weight(1f)) {
                         CustomTextField(
                             v = urlText, 
@@ -1431,17 +1520,23 @@ private fun BrowserTab(
                             }, 
                             ph = "Enter URL...", 
                             modifier = Modifier.fillMaxWidth(), 
-                            leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(16.dp), tint = Color(0xFF94A3B8)) },
+                            leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp), tint = Color(0xFF94A3B8)) },
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go), 
                             keyboardActions = KeyboardActions(onGo = { 
                                 if (urlText.isNotBlank()) { 
-                                    val finalUrl = if (urlText.startsWith("http")) urlText else "https://$urlText"
+                                    val trimmedUrl = urlText.trim()
+                                    val finalUrl = when {
+                                        trimmedUrl.startsWith("http://", ignoreCase = true) -> trimmedUrl
+                                        trimmedUrl.startsWith("https://", ignoreCase = true) -> trimmedUrl
+                                        else -> "https://$trimmedUrl"
+                                    }
                                     webView.loadUrl(viewModel.replaceVariables(finalUrl)) 
                                 }
                                 showSuggestions = false
                                 focusManager.clearFocus()
                                 keyboardController?.hide()
-                            })
+                            }),
+                            onFocusChanged = { isUrlFocused = it }
                         )
                         if (showSuggestions && browserSuggestions.isNotEmpty()) {
                             Popup(
@@ -1477,10 +1572,12 @@ private fun BrowserTab(
                             }
                         }
                     }
-                    IconButton(onClick = onShowOptions) { 
-                        Icon(Icons.Default.Tune, "Settings", tint = Color.White) 
+                    if (!isUrlFocused) {
+                        IconButton(onClick = onShowOptions) { 
+                            Icon(Icons.Default.Tune, "Settings", tint = Color.White, modifier = Modifier.size(20.dp)) 
+                        }
+                        IconButton(onClick = onShowHistory) { Icon(Icons.Default.History, "History", tint = Color.White, modifier = Modifier.size(20.dp)) }
                     }
-                    IconButton(onClick = onShowHistory) { Icon(Icons.Default.History, "History", tint = Color.White) }
                 }
             }
             if (loadProgress > 0) { LinearProgressIndicator(progress = { loadProgress / 100f }, modifier = Modifier.fillMaxWidth().height(2.dp), color = Color(0xFF7C3AED), trackColor = Color.Transparent) }
@@ -1558,7 +1655,11 @@ private fun BrowserTab(
             contentColor = Color.White,
             modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 16.dp, end = 16.dp) 
         ) {
-            Icon(if (isInterceptEnabled) Icons.Default.Block else Icons.Default.Security, "Intercept")
+            Icon(
+                if (isInterceptEnabled) Icons.Default.Block else Icons.Default.Security, 
+                "Intercept",
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }
@@ -1593,7 +1694,7 @@ private fun InterceptView(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { if (isExpandedFull) isExpandedFull = false else showDetail = false }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White, modifier = Modifier.size(20.dp))
                     }
                     Column {
                         Text("${selectedReq.method} Intercept", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -1675,9 +1776,9 @@ private fun InterceptView(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("INTERCEPTED REQUEST", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text("Intercepted Request", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 IconButton(onClick = { onToggleIntercept(false) }) {
-                    Icon(Icons.Default.Block, "Stop Intercept", tint = Color(0xFFEF4444))
+                    Icon(Icons.Default.Block, "Stop Intercept", tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp))
                 }
             }
 
@@ -1763,7 +1864,7 @@ private fun ComparerTab(text1: String, text2: String, onText1Change: (String) ->
                     val isDifferent = line1 != line2
                     
                     Row(modifier = Modifier.fillMaxWidth().background(if (isDifferent) Color(0xFF7C3AED).copy(alpha = 0.1f) else Color.Transparent).padding(vertical = 2.dp)) {
-                        Text("${i + 1}", color = Color(0xFF4B5563), fontSize = 10.sp, modifier = Modifier.width(30.dp).padding(start = 4.dp))
+                        Text((i + 1).toString(), color = Color(0xFF4B5563), fontSize = 10.sp, modifier = Modifier.width(30.dp).padding(start = 4.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             if (line1.isNotEmpty() || i < lines1.size) {
                                 Text(line1, color = if (isDifferent) Color(0xFFEF4444) else Color(0xFF94A3B8), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
@@ -1913,7 +2014,7 @@ private fun InterceptSettingsDialog(
                         }
                     }
                 }
-                
+
                 Spacer(Modifier.height(8.dp))
                 Text("Note: These rules apply when Intercept is ON.", color = Color.Gray, fontSize = 10.sp)
             }
@@ -1958,7 +2059,8 @@ private fun RenderLargeText(
     isExpanded: Boolean,
     listState: LazyListState = rememberLazyListState(),
     currentMatchIndex: Int = 0,
-    onMatchesFound: (List<Int>) -> Unit = {}
+    onMatchesFound: (List<Int>) -> Unit = {},
+    showCopyFull: Boolean = true
 ) {
     val maxChars = if (isExpanded) 10_000_000 else 2_000_000
     val isActuallyTruncated = text.length > maxChars
@@ -2007,6 +2109,8 @@ private fun RenderLargeText(
             listState.firstVisibleItemIndex < maxOf(0, lines.size - 10)
         }
     }
+    
+    val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -2080,20 +2184,22 @@ private fun RenderLargeText(
             }
         }
         
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp)
-                .then(if (isExpanded) Modifier.navigationBarsPadding() else Modifier),
-            horizontalArrangement = Arrangement.End
-        ) {
-            Button(
-                onClick = { copyToClipboard(context, text) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937))
+        if (showCopyFull) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+                    .then(if (isExpanded) Modifier.navigationBarsPadding() else Modifier),
+                horizontalArrangement = Arrangement.End
             ) {
-                Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Copy Full")
+                Button(
+                    onClick = { copyToClipboard(context, text, scope) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937))
+                ) {
+                    Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Copy Full")
+                }
             }
         }
         }
@@ -2295,7 +2401,8 @@ private fun ResponseSection(
     initialPage: Int = 0,
     showExtract: Boolean = true,
     isFullscreen: Boolean = false,
-    onToggleFullscreen: (() -> Unit)? = null
+    onToggleFullscreen: (() -> Unit)? = null,
+    showCopyFull: Boolean = true
 ) {
     val context = LocalContext.current
     var internalIsExpanded by remember { mutableStateOf(false) }
@@ -2464,7 +2571,8 @@ private fun ResponseSection(
                     isExpanded = currentIsExpanded,
                     listState = listStates[page],
                     currentMatchIndex = currentMatchIndices[page].intValue,
-                    onMatchesFound = { matchIndicesList[page].value = it }
+                    onMatchesFound = { matchIndicesList[page].value = it },
+                    showCopyFull = showCopyFull
                 )
             }
         }
@@ -2494,7 +2602,8 @@ private fun ResponseSection(
                         showExtract = showExtract,
                         isFullscreen = true,
                         onToggleFullscreen = { internalIsExpanded = false },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        showCopyFull = showCopyFull
                     )
                     Spacer(Modifier.navigationBarsPadding())
                 }
@@ -2531,7 +2640,40 @@ private fun highlightSyntax(line: String): AnnotatedString {
 }
 
 @Composable
-private fun CustomTextField(v: String, ovc: (String) -> Unit, ph: String, modifier: Modifier = Modifier, leadingIcon: (@Composable () -> Unit)? = null, keyboardOptions: KeyboardOptions = KeyboardOptions.Default, keyboardActions: KeyboardActions = KeyboardActions.Default) { BasicTextField(v, ovc, modifier = modifier.height(36.dp).background(Color(0xFF0F172A), RoundedCornerShape(12.dp)).border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp)), singleLine = true, textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp), cursorBrush = androidx.compose.ui.graphics.SolidColor(Color(0xFF7C3AED)), keyboardOptions = keyboardOptions, keyboardActions = keyboardActions, decorationBox = { itf -> Row(modifier = Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) { if (leadingIcon != null) leadingIcon(); Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { if (v.isEmpty()) Text(ph, color = SyntaxColors.Muted, fontSize = 12.sp); itf() } } } ) }
+private fun CustomTextField(
+    v: String, 
+    ovc: (String) -> Unit, 
+    ph: String, 
+    modifier: Modifier = Modifier, 
+    leadingIcon: (@Composable () -> Unit)? = null, 
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default, 
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    onFocusChanged: (Boolean) -> Unit = {}
+) { 
+    BasicTextField(
+        v, 
+        ovc, 
+        modifier = modifier
+            .height(36.dp)
+            .background(Color(0xFF0F172A), RoundedCornerShape(12.dp))
+            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
+            .onFocusChanged { onFocusChanged(it.isFocused) },
+        singleLine = true, 
+        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp), 
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(Color(0xFF7C3AED)), 
+        keyboardOptions = keyboardOptions, 
+        keyboardActions = keyboardActions, 
+        decorationBox = { itf -> 
+            Row(modifier = Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) { 
+                if (leadingIcon != null) leadingIcon()
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { 
+                    if (v.isEmpty()) Text(ph, color = SyntaxColors.Muted, fontSize = 12.sp)
+                    itf() 
+                } 
+            } 
+        } 
+    ) 
+}
 
 @Composable
 private fun TheRepeatorTheme(content: @Composable () -> Unit) { 

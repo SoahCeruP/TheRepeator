@@ -31,6 +31,8 @@ import okio.ByteString.Companion.toByteString
 import okio.ByteString.Companion.decodeHex
 import okio.ByteString
 import java.util.concurrent.ConcurrentHashMap
+import java.security.cert.X509Certificate
+import javax.net.ssl.X509TrustManager
 
 class TheRepeatorViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
@@ -41,7 +43,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     val matchReplaceRules = repository.matchReplaceRules
     val variables = repository.variables
     val scopeRules = repository.scopeRules
-    
+
     private val _historyFilters = MutableStateFlow(setOf<String>())
     val historyFilters = _historyFilters.asStateFlow()
 
@@ -52,6 +54,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     val historySortField = _historySortField.asStateFlow()
 
     private val _historySortAscending = MutableStateFlow(value = false)
+    val historySortAscending = _historySortAscending.asStateFlow()
 
     private val _onlyShowInScope = MutableStateFlow(value = false)
     val onlyShowInScope = _onlyShowInScope.asStateFlow()
@@ -78,6 +81,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _selectedHistoryRequestDetails = MutableStateFlow<TheRepeatorRequest?>(null)
     val selectedHistoryRequestDetails = _selectedHistoryRequestDetails.asStateFlow()
+
+    private val _authorizedInsecureDomains = MutableStateFlow(setOf<String>())
+    val authorizedInsecureDomains = _authorizedInsecureDomains.asStateFlow()
 
     val browserHistory: StateFlow<List<BrowserHistoryItem>> = repository.browserHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -135,8 +141,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     init {
         viewModelScope.launch {
+            // As a security tool, we clear session data (Requests & Intruder) on startup.
+            // Only Browser History is kept as per user request.
             repository.clearHistory()
-            repository.clearIntruderResults("default")
+            repository.clearAllIntruderResults()
         }
         viewModelScope.launch {
             for (request in interceptionChannel) {
@@ -168,8 +176,6 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _updatedRawRequest = MutableStateFlow<String?>(null)
     val updatedRawRequest: StateFlow<String?> = _updatedRawRequest.asStateFlow()
-
-    private val _decodedSelection = MutableStateFlow<String?>(null)
 
     private val _hasNewRepeaterItem = MutableStateFlow(value = false)
     val hasNewRepeaterItem: StateFlow<Boolean> = _hasNewRepeaterItem.asStateFlow()
@@ -278,35 +284,69 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     private var autoReconnect = false
     private var lastWsUrl: String? = null
     
-    private val okHttpClient = OkHttpClient.Builder()
-        .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+    private val baseOkHttpClient = OkHttpClient.Builder()
+        .protocols(listOf(Protocol.HTTP_1_1)) // Force HTTP/1.1 for broad compatibility and proxy support
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(true) // Browser/Proxy should follow redirects
-        .followSslRedirects(true)
+        .followRedirects(followRedirects = true)
+        .followSslRedirects(followProtocolRedirects = true)
+        .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
+        .build()
+
+    @SuppressLint("CustomX509TrustManager")
+    private val trustAllManager = object : X509TrustManager {
+        @SuppressLint("TrustAllX509TrustManager")
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        @SuppressLint("TrustAllX509TrustManager")
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    private val unsafeOkHttpClient = baseOkHttpClient.newBuilder()
         .hostnameVerifier { _, _ -> true }
-        .sslSocketFactory(
-            createUnsafeSslSocketFactory(), 
-            @SuppressLint("CustomX509TrustManager") object : javax.net.ssl.X509TrustManager {
-                @SuppressLint("TrustAllX509TrustManager")
-                override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                @SuppressLint("TrustAllX509TrustManager")
-                override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            },
+        .sslSocketFactory(createUnsafeSslSocketFactory(trustAllManager), trustAllManager)
+        .connectionSpecs(
+            listOf(
+                ConnectionSpec.Builder(ConnectionSpec.COMPATIBLE_TLS)
+                    .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2, TlsVersion.TLS_1_1, TlsVersion.TLS_1_0)
+                    .allEnabledCipherSuites()
+                    .build(),
+                ConnectionSpec.CLEARTEXT,
+            )
         )
         .build()
 
-    private val repeaterOkHttpClient = okHttpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
+    private fun getOkHttpClient(url: String, followRedirects: Boolean = true): OkHttpClient {
+        val host = try { URL(url).host } catch(_: Exception) { "" }
+        val isUnsafe = authorizedInsecureDomains.value.contains(host)
+        val base = if (isUnsafe) unsafeOkHttpClient else baseOkHttpClient
+        
+        return if (followRedirects) base else base.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    }
+
+    private val repeaterBaseClient = baseOkHttpClient.newBuilder()
+        .followRedirects(followRedirects = false)
+        .followSslRedirects(followProtocolRedirects = false)
         .build()
 
-    private val intruderOkHttpClient = okHttpClient.newBuilder()
+    private val repeaterUnsafeClient = unsafeOkHttpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    private fun getRepeaterHttpClient(url: String): OkHttpClient {
+        val host = try { URL(url).host } catch(_: Exception) { "" }
+        val isUnsafe = authorizedInsecureDomains.value.contains(host)
+        android.util.Log.d("Repeater", "Using ${if (isUnsafe) "UNSAFE" else "SAFE"} client for $host")
+        return if (isUnsafe) repeaterUnsafeClient else repeaterBaseClient
+    }
+
+    private val intruderBaseClient = baseOkHttpClient.newBuilder()
         .protocols(listOf(Protocol.HTTP_1_1))
-        .followRedirects(true) // Intruder usually follows redirects
-        .followSslRedirects(true)
+        .followRedirects(followRedirects = true)
+        .followSslRedirects(followProtocolRedirects = true)
         .dispatcher(
             Dispatcher().apply {
                 maxRequests = 500
@@ -315,16 +355,26 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         )
         .build()
 
-    private fun createUnsafeSslSocketFactory(): javax.net.ssl.SSLSocketFactory {
-        val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-            @SuppressLint("CustomX509TrustManager") object : javax.net.ssl.X509TrustManager {
-                @SuppressLint("TrustAllX509TrustManager")
-                override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                @SuppressLint("TrustAllX509TrustManager")
-                override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            },
+    private val intruderUnsafeClient = unsafeOkHttpClient.newBuilder()
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .followRedirects(followRedirects = true)
+        .followSslRedirects(followProtocolRedirects = true)
+        .dispatcher(
+            Dispatcher().apply {
+                maxRequests = 500
+                maxRequestsPerHost = 500
+            }
         )
+        .build()
+
+    private fun getIntruderHttpClient(url: String): OkHttpClient {
+        val host = try { URL(url).host } catch(_: Exception) { "" }
+        val isUnsafe = authorizedInsecureDomains.value.contains(host)
+        return if (isUnsafe) intruderUnsafeClient else intruderBaseClient
+    }
+
+    private fun createUnsafeSslSocketFactory(trustManager: X509TrustManager): javax.net.ssl.SSLSocketFactory {
+        val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(trustManager)
         val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
         sslContext.init(null, trustAllCerts, java.security.SecureRandom())
         return sslContext.socketFactory
@@ -488,11 +538,6 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
     fun updateIntruderPayloads(p: String) { _intruderState.update { s -> s.copy(payloads = p.lines().filter { it.isNotBlank() }) } }
-    @Suppress("unused")
-    fun appendIntruderPayloads(p: String) {
-        val added = p.lines().filter { it.isNotBlank() }
-        _intruderState.update { it.copy(payloads = (it.payloads + added).distinct()) }
-    }
     fun clearIntruderPayloads() { _intruderState.update { it.copy(payloads = emptyList(), payloadFileUri = null) } }
 
     fun setIntruderSettings(c: Int, r: Long, t: Int, rd: Boolean, eu: Boolean, db: Boolean, rps: Int) {
@@ -519,6 +564,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         _interceptionSettings.update { it.copy(mode = mode) }
     }
 
+    fun authorizeInsecureDomain(domain: String) {
+        _authorizedInsecureDomains.update { it + domain }
+    }
+
     fun addInterceptionHost(host: String) {
         _interceptionSettings.update { it.copy(selectedHosts = it.selectedHosts + host) }
     }
@@ -539,7 +588,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         
         val stateSnapshot = _intruderState.value
         val template = stateSnapshot.templateRequest
-        val hasPayloads = stateSnapshot.payloadFileUri != null || stateSnapshot.payloads.isNotEmpty()
+        val hasPayloads = (stateSnapshot.payloadFileUri != null) || stateSnapshot.payloads.isNotEmpty()
         
         if (template.isBlank() || !template.contains("§") || !hasPayloads) {
             val reason = when {
@@ -760,7 +809,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                                     val mediaType = contentType?.toMediaTypeOrNull()
                                     val reqBody = createRequestBody(parsed.method, parsed.body, mediaType)
                                     
-                                    intruderOkHttpClient.newCall(builder.method(parsed.method, reqBody).build()).execute().use { resp ->
+                                    getIntruderHttpClient(parsed.url).newCall(builder.method(parsed.method, reqBody).build()).execute().use { resp ->
                                         val rb = resp.body?.string() ?: ""
                                         val storedResponse = if (rb.length > 200_000) rb.take(200_000) + "\n\n[... RESPONSE TRUNCATED IN STORAGE ...]" else rb
                                         val result = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = resp.code, length = rb.length, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "HTTP ${resp.code}\n${resp.headers}\n$storedResponse")
@@ -869,7 +918,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             val mediaType = finalHeaders["Content-Type"]?.toMediaTypeOrNull() ?: finalHeaders["content-type"]?.toMediaTypeOrNull()
             val requestBody = createRequestBody(finalMethod, finalBody, mediaType)
             
-            val call = okHttpClient.newCall(builder.method(finalMethod, requestBody).build())
+            // To allow the browser to handle cookies, state, and URL updates correctly,
+            // we must NOT follow redirects internally. We return the 30x to the WebView.
+            val call = getOkHttpClient(finalUrl, followRedirects = false).newCall(builder.method(finalMethod, requestBody).build())
             val resp = withContext(Dispatchers.IO) { call.execute() }
             
             val rawBytes = withContext(Dispatchers.IO) { resp.body?.bytes() } ?: byteArrayOf()
@@ -882,6 +933,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             
             val cookieManager = android.webkit.CookieManager.getInstance()
             resp.headers("Set-Cookie").forEach { cookieManager.setCookie(finalUrl, it) }
+            cookieManager.flush()
             
             val host = try { URL(finalUrl).host } catch(_: Exception) { "" }
             val path = try { URL(finalUrl).path.ifEmpty { "/" } } catch(_: Exception) { "/" }
@@ -897,6 +949,13 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             )
             if (isRequestInScope(req)) repository.addRequest(req)
             
+            if (resp.code in 300..399) {
+                // Fixed: Android WebView strictly forbids returning responses with status code 300-399 
+                // in shouldInterceptRequest. We log it and return null to let the WebView handle 
+                // the redirect natively.
+                return null
+            }
+            
             android.webkit.WebResourceResponse(
                 contentType.substringBefore(";"), 
                 resp.header("Content-Encoding"), 
@@ -906,11 +965,56 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 ByteArrayInputStream(rawBytes),
             )
         } catch (e: Exception) { 
+            val errorMsg = e.message ?: "Unknown Error"
+            val isSslError = errorMsg.contains("SSL") || errorMsg.contains("cert", ignoreCase = true)
+            
             android.webkit.WebResourceResponse(
-                "text/html", "UTF-8", 502, "Bad Gateway", emptyMap(),
-                ByteArrayInputStream("<html><body><h1>Connection Error</h1><p>${e.message}</p></body></html>".toByteArray())
+                "text/html", "UTF-8", 502, "Connection Error", emptyMap(),
+                ByteArrayInputStream(createErrorHtml(finalUrl, errorMsg, isSslError).toByteArray())
             )
         }
+    }
+
+    private fun createErrorHtml(url: String, error: String, isSsl: Boolean): String {
+        val host = try { URL(url).host } catch(_: Exception) { url }
+        val title = if (isSsl) "SSL Certificate Error" else "Connection Error"
+        val icon = if (isSsl) "🔒" else "⚠️"
+        
+        return """
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body { font-family: -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; text-align: center; }
+                    .card { background: #1e293b; border-radius: 1rem; padding: 2rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+                    h1 { color: #ef4444; margin-bottom: 0.5rem; }
+                    p { color: #94a3b8; margin-bottom: 2rem; }
+                    .btn { background: #7c3aed; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.5rem; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; }
+                    .btn-outline { background: transparent; border: 1px solid #475569; color: #94a3b8; margin-top: 1rem; }
+                    .error-detail { font-family: monospace; font-size: 0.8rem; background: #0b1020; padding: 1rem; border-radius: 0.5rem; text-align: left; margin-top: 2rem; overflow-x: auto; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div style="font-size: 3rem;">$icon</div>
+                    <h1>$title</h1>
+                    <p>TheRepeator blocked an insecure connection to <strong>$host</strong>.</p>
+                    
+                    <div style="display: flex; flex-direction: column; gap: 10px; align-items: center;">
+                        <a href="${url.replace("http://", "https://")}" class="btn" style="background: #22c55e;">Try HTTPS Version</a>
+                        <a href="https://repeator.local/authorize?url=${URLEncoder.encode(url, "UTF-8")}" class="btn">Accept Risk & Continue (HTTP)</a>
+                    </div>
+                    
+                    <div class="error-detail">
+                        <strong>Error Detail:</strong><br>
+                        $error
+                    </div>
+                    
+                    <button onclick="window.history.back()" class="btn btn-outline">Go Back</button>
+                </div>
+            </body>
+            </html>
+        """.trimIndent()
     }
 
     private fun isBinary(contentType: String?): Boolean {
@@ -921,12 +1025,51 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     suspend fun handleBrowserTraffic(method: String, url: String, headers: Map<String, String>): android.webkit.WebResourceResponse? {
+        // Logins/State: standard WebView interception CANNOT see POST bodies.
+        // If we intercept a POST, the body is lost, breaking login pages.
+        // Therefore, we let POST requests go through the standard networking stack.
+        if (method.uppercase() == "POST") {
+            return null
+        }
+
+        // Handle internal authorization protocol via virtual domain
+        if (url.startsWith("https://repeator.local/authorize") || url.startsWith("http://repeator.local/authorize")) {
+            val targetUrl = url.toUri().getQueryParameter("url")
+            if (targetUrl != null) {
+                val domain = try { URL(targetUrl).host } catch(_: Exception) { "" }
+                if (domain.isNotEmpty()) {
+                    authorizeInsecureDomain(domain)
+                    // Return a simple HTML page that redirects back viaJavascript (more stable than 302 in shouldInterceptRequest)
+                    val redirectHtml = "<html><script>window.location.href='${targetUrl.replace("'", "\\'")}';</script></html>"
+                    return android.webkit.WebResourceResponse(
+                        "text/html", "UTF-8", 200, "OK", emptyMap(),
+                        ByteArrayInputStream(redirectHtml.toByteArray())
+                    )
+                }
+            }
+        }
+
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             return null // Let WebView handle data:, blob:, etc. natively
         }
         
         val uo = try { URL(url) } catch(_: Exception) { null }
         val host = uo?.host ?: ""
+
+        // Security: Automatically try to switch to HTTPS if possible
+        if (url.startsWith("http://") && !authorizedInsecureDomains.value.contains(host)) {
+            // Check if this is a main document navigation
+            val accept = headers.entries.find { it.key.equals("Accept", ignoreCase = true) }?.value ?: ""
+            val isRootPath = uo?.path == null || uo.path.isEmpty() || (uo.path == "/")
+            
+            if (method == "GET" && (accept.contains("text/html") || isRootPath)) {
+                // Return the "Accept Risk" warning page
+                return android.webkit.WebResourceResponse(
+                    "text/html", "UTF-8", 200, "OK", emptyMap(),
+                    ByteArrayInputStream(createErrorHtml(url, "Plain HTTP connections are unencrypted and insecure. You should use HTTPS whenever possible.", false).toByteArray())
+                )
+            }
+        }
         val pathAndQuery = (uo?.path ?: "/").ifEmpty { "/" } + (if (uo?.query != null) "?" + uo.query else "")
         
         val contentType = headers.entries.find { it.key.equals("Content-Type", ignoreCase = true) }?.value?.lowercase() ?: ""
@@ -1028,7 +1171,6 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     fun toggleHistoryFilter(filter: String) { val current = _historyFilters.value; _historyFilters.value = if (current.contains(filter)) current - filter else current + filter }
     fun updateHistorySearch(q: String) { _historySearchQuery.value = q }
     fun toggleOnlyInScope(enabled: Boolean) { _onlyShowInScope.value = enabled }
-    fun tryDecodeBase64(input: String) { try { val d = Base64.decode(input, Base64.DEFAULT); val str = String(d, StandardCharsets.UTF_8); _decodedSelection.value = str } catch (_: Exception) { _decodedSelection.value = null } }
     fun clearHistory() { viewModelScope.launch { repository.clearHistory() } }
 
     fun toggleIntercept(enabled: Boolean) {
@@ -1093,7 +1235,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             req?.deferred?.complete(
                 android.webkit.WebResourceResponse(
                     "text/html", "UTF-8", 403, "Dropped by User", null, 
-                    ByteArrayInputStream("Request Dropped".toByteArray())
+                    ByteArrayInputStream("Request Dropped".toByteArray()),
                 )
             )
             val nextQueue = queue.filter { it.id != targetId }
@@ -1112,7 +1254,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { _wsState.value = "DISCONNECTED"; if (autoReconnect) viewModelScope.launch { delay(3000.milliseconds); connectWebSocket(u, reconnect = true) } }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { _wsState.value = "ERROR"; addWsMsg(MessageDirection.RECEIVED, "Error: ${t.message}"); if (autoReconnect) viewModelScope.launch { delay(5000.milliseconds); connectWebSocket(u, reconnect = true) } }
         }
-        webSocket = okHttpClient.newWebSocket(Request.Builder().url(u).build(), listener)
+        webSocket = getOkHttpClient(u).newWebSocket(Request.Builder().url(u).build(), listener)
     }
 
     fun sendWsMessage(txt: String) { 
@@ -1157,7 +1299,12 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     fun getRawFromTheRepeatorRequest(req: TheRepeatorRequest): String {
         val headersJson = req.requestHeadersJson ?: req.headersJson
         val headers = try { Json.decodeFromString<Map<String, String>>(headersJson) } catch (_: Exception) { emptyMap() }
-        val sb = StringBuilder(); sb.append("${req.method} ${req.path.ifEmpty { "/" }} ${req.protocol}\n"); sb.append("Host: ${req.host}\n")
+        val sb = StringBuilder(); sb.append("${req.method} ${req.path.ifEmpty { "/" }} ${req.protocol}\n")
+        
+        // Use a virtual protocol prefix in the Host header so parseRawRequest knows the original scheme
+        val hostPrefix = if (req.url.startsWith("http://")) "http://" else ""
+        sb.append("Host: $hostPrefix${req.host}\n")
+        
         headers.forEach { (k, v) -> if (k.lowercase() != "host") sb.append("$k: $v\n") }
         sb.append("\n")
         sb.append(req.requestBody ?: "")
@@ -1177,7 +1324,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     val finalRequest = applyRules(replaceVariables(raw))
                     val parsed = parseRawRequest(finalRequest)
                     val builder = Request.Builder().url(parsed.url)
-                    parsed.headers.forEach { (k, v) -> if (k.lowercase() != "host" && k.lowercase() != "content-length") builder.addHeader(k, v) }
+                    parsed.headers.forEach { (k, v) -> if ((k.lowercase() != "host") && (k.lowercase() != "content-length")) builder.addHeader(k, v) }
                     
                     val mediaType = parsed.headers["Content-Type"]?.toMediaTypeOrNull()
                     val body = if (parsed.body.isNotEmpty()) {
@@ -1188,7 +1335,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                         null
                     }
                     
-                    val call = try { repeaterOkHttpClient.newCall(builder.method(parsed.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) repeaterOkHttpClient.newCall(builder.method(parsed.method, null).build()) else throw e }
+                    val call = try { getRepeaterHttpClient(parsed.url).newCall(builder.method(parsed.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) getRepeaterHttpClient(parsed.url).newCall(builder.method(parsed.method, null).build()) else throw e }
                     call.execute().use { resp ->
                         val rawBytes = resp.body?.bytes() ?: byteArrayOf()
                         val contentType = resp.header("Content-Type") ?: "text/html"
@@ -1215,7 +1362,20 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                             }
                         }
                     }
-                } catch (e: Exception) { if (e !is CancellationException) { updateTabResponse(idx, "Error: ${e.message}"); updateTabLoading(tabId, loading = false) } }
+                } catch (e: Exception) { 
+                    if (e !is CancellationException) { 
+                        val errorMsg = e.message ?: "Unknown Error"
+                        val isSslOrInsecure = errorMsg.contains("SSL") || errorMsg.contains("cert", ignoreCase = true) || errorMsg.contains("cleartext", ignoreCase = true)
+                        
+                        val finalMsg = if (isSslOrInsecure) {
+                             "Error: Insecure Connection. Please use the Browser tab to authorize this domain.\n\nDetail: $errorMsg"
+                        } else {
+                            "Error: $errorMsg"
+                        }
+                        updateTabResponse(idx, finalMsg)
+                        updateTabLoading(tabId, loading = false) 
+                    } 
+                }
             }
             repeaterJobs[tabId] = job
         }
@@ -1224,7 +1384,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     fun followRedirect(tabId: String, followAll: Boolean = true) {
         redirectJob = viewModelScope.launch(Dispatchers.IO) {
             var currentReq: String? = null; var hasRedir = true; var count = 0
-            while (hasRedir && count < 10) {
+            while (hasRedir && (count < 10)) {
                 count++; val tabs = _repeaterTabs.value.toMutableList(); val idx = tabs.indexOfFirst { it.id == tabId }; if (idx == -1) break
                 val t = tabs[idx]; val nextUrl = t.redirectUrl ?: break
                 val lastRaw = currentReq ?: t.rawRequest; val p = try { parseRawRequest(lastRaw) } catch (_: Exception) { break }
@@ -1247,7 +1407,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             val fr = applyRules(replaceVariables(raw)); val p = parseRawRequest(fr); val builder = Request.Builder().url(p.url)
             p.headers.forEach { (k, v) -> if (k.lowercase() != "host" && k.lowercase() != "content-length") builder.addHeader(k, v) }
             val body = if (p.body.isNotEmpty()) p.body.toRequestBody(p.headers["Content-Type"]?.toMediaTypeOrNull()) else if (listOf("POST", "PUT", "PATCH").contains(p.method)) "".toRequestBody(p.headers["Content-Type"]?.toMediaTypeOrNull()) else null
-            val call = try { okHttpClient.newCall(builder.method(p.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) okHttpClient.newCall(builder.method(p.method, null).build()) else throw e }
+            val call = try { getOkHttpClient(p.url).newCall(builder.method(p.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) getOkHttpClient(p.url).newCall(builder.method(p.method, null).build()) else throw e }
             call.execute().use { resp ->
                 val rb = resp.body?.string() ?: ""; val full = "HTTP ${resp.code}\n${resp.headers}\n$rb"; val loc = if (resp.code in 300..399) resp.header("Location") else null
                 withContext(Dispatchers.Main) {
@@ -1297,14 +1457,22 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         // Smarter URL reconstruction
         var finalUrl = rawUrl
         if (!finalUrl.startsWith("http://") && !finalUrl.startsWith("https://")) {
-            finalUrl = if (hostHeader != null) {
-                val scheme = if (hostHeader.contains(":80") || finalUrl.contains(":80")) "http" else "https"
+            if (hostHeader != null) {
+                // Support explicit protocol prefix in Host header as a hint
+                var scheme = if (hostHeader.startsWith("http://")) "http" else if (hostHeader.startsWith("https://")) "https" else null
+                val cleanHost = if (scheme != null) hostHeader.substring(scheme.length + 3) else hostHeader
+                
+                // Fallback to port detection or default to https
+                if (scheme == null) {
+                    scheme = if (cleanHost.contains(":80") || finalUrl.contains(":80")) "http" else "https"
+                }
+
                 // Check if rawUrl already contains the host (e.g. "google.com/")
-                if (finalUrl.startsWith(hostHeader)) {
+                finalUrl = if (finalUrl.startsWith(cleanHost)) {
                     "$scheme://$finalUrl"
                 } else {
                     val cleanPath = if (finalUrl.startsWith("/")) finalUrl else "/$finalUrl"
-                    "$scheme://$hostHeader$cleanPath"
+                    "$scheme://$cleanHost$cleanPath"
                 }
             } else {
                 throw Exception("No Host header found for relative URL: $rawUrl")
