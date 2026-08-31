@@ -1,22 +1,28 @@
 package com.therepeator.app
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.PersistableBundle
+import android.webkit.CookieManager
 import android.webkit.SslErrorHandler
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedVisibility
@@ -29,7 +35,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -58,6 +63,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -127,6 +133,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     var sendToDecoderText by remember { mutableStateOf<String?>(null) }
     var loadProgress by remember { mutableIntStateOf(0) }
 
+
     // BackHandler moved to specific tabs to avoid global recomposition
 
     val browserWebView = remember {
@@ -144,32 +151,37 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 builtInZoomControls = true
                 displayZoomControls = false
                 
+                // Enhanced for broad site compatibility (fixes menus, etc)
+                allowFileAccess = true
+                allowContentAccess = true
+                setSupportMultipleWindows(true)
+                mediaPlaybackRequiresUserGesture = false
+                
                 // Allow mixed content for testing sites with HTTP resources
                 mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 
-                // Security Hardening
-                allowFileAccess = false
-                allowContentAccess = false
-                @Suppress("DEPRECATION")
-                allowFileAccessFromFileURLs = false
-                @Suppress("DEPRECATION")
-                allowUniversalAccessFromFileURLs = false
+                // Optimized caching for performance
+                cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                 
                 userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
             }
             
+            // Critical for interactive menus/forms
+            isFocusable = true
+            isFocusableInTouchMode = true
+            
             // Handle cookies properly
-            val cookieManager = android.webkit.CookieManager.getInstance()
+            val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
             cookieManager.setAcceptThirdPartyCookies(this, true)
 
-            webChromeClient = object : android.webkit.WebChromeClient() { 
+            webChromeClient = object : WebChromeClient() { 
                 override fun onProgressChanged(view: WebView?, newProgress: Int) { 
                     loadProgress = newProgress 
                 } 
             }
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     url?.let { 
                         if (it != "about:blank") {
@@ -197,6 +209,8 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     }
 
     // LaunchedEffect moved to RepeaterTabWrapper
+
+    val selectedHistoryRequest by vm.selectedHistoryRequestDetails.collectAsState()
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -290,7 +304,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = { 
-                if (selectedTab != 5) {
+                if (selectedTab != 5 && (selectedTab != 4 || selectedHistoryRequest == null)) {
                     TopHeaderBar(
                         onMenuClick = { scope.launch { drawerState.open() } }, 
                         onSettings = { showSettings = true }
@@ -298,12 +312,14 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 }
             },
             bottomBar = { 
-                BottomBarTabs(
-                    selectedTab = selectedTab, 
-                    onTabSelected = { vm.selectBottomTab(it) },
-                    hasNewRepeater = hasNewRepeater,
-                    hasNewIntruder = hasNewIntruder
-                ) 
+                if (selectedTab != 4 || selectedHistoryRequest == null) {
+                    BottomBarTabs(
+                        selectedTab = selectedTab, 
+                        onTabSelected = { vm.selectBottomTab(it) },
+                        hasNewRepeater = hasNewRepeater,
+                        hasNewIntruder = hasNewIntruder
+                    ) 
+                }
             }
         ) { padding ->
             Surface(modifier = Modifier.padding(padding).fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -478,6 +494,9 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                                     Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
                                 }
                             }
+                            IconButton(onClick = { isExpandedFull = !isExpandedFull }, modifier = Modifier.size(32.dp)) {
+                                Icon(if (isExpandedFull) Icons.Default.FullscreenExit else Icons.Default.Fullscreen, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            }
                         }
                     }
 
@@ -488,6 +507,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                                 searchQuery = searchQuery, 
                                 context = context, 
                                 isExpanded = isExpandedFull,
+                                onToggleExpand = { isExpandedFull = !isExpandedFull },
                                 listState = requestListState,
                                 currentMatchIndex = currentMatchIndex,
                                 onMatchesFound = { matchIndices = it }
@@ -509,30 +529,32 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                         }
                     }
 
-                    Row(modifier = Modifier.fillMaxWidth().padding(8.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { 
-                            vm.addRepeaterTab("I", res.request)
-                            android.widget.Toast.makeText(context, "Sent to Repeater", android.widget.Toast.LENGTH_SHORT).show()
-                            vm.selectIntruderResult(null) 
-                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("To Repeater", fontSize = 12.sp) }
-                        Button(onClick = { 
-                            vm.sendToIntruder(res.request)
-                            android.widget.Toast.makeText(context, "Sent to Intruder", android.widget.Toast.LENGTH_SHORT).show()
-                            vm.selectIntruderResult(null) 
-                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Intruder", fontSize = 12.sp) }
-                        Button(onClick = { 
-                            vm.sendToComparerSmart(res.request)
-                            android.widget.Toast.makeText(context, "Sent to Comparer", android.widget.Toast.LENGTH_SHORT).show()
-                            vm.selectIntruderResult(null) 
-                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Comparer", fontSize = 12.sp) }
-                    }
-                    
-                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        StatItem("Length", formatSize(res.length))
-                        StatItem("Time", "${res.responseTime}ms")
-                        StatItem("Status", res.statusCode.toString(), color = when(res.statusCode) { in 200..299 -> Color(0xFF22C55E); in 400..499 -> Color(0xFFFB923C); else -> Color(0xFFEF4444) })
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { vm.selectIntruderResult(null) }) { Text("Close") }
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { 
+                                vm.addRepeaterTab("I", res.request)
+                                Toast.makeText(context, "Sent to Repeater", Toast.LENGTH_SHORT).show()
+                                vm.selectIntruderResult(null) 
+                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("To Repeater", fontSize = 12.sp) }
+                            Button(onClick = { 
+                                vm.sendToIntruder(res.request)
+                                Toast.makeText(context, "Sent to Intruder", Toast.LENGTH_SHORT).show()
+                                vm.selectIntruderResult(null) 
+                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Intruder", fontSize = 12.sp) }
+                            Button(onClick = { 
+                                vm.sendToComparerSmart(res.request)
+                                Toast.makeText(context, "Sent to Comparer", Toast.LENGTH_SHORT).show()
+                                vm.selectIntruderResult(null) 
+                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Comparer", fontSize = 12.sp) }
+                        }
+                        
+                        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            StatItem("Length", formatSize(res.length))
+                            StatItem("Time", "${res.responseTime}ms")
+                            StatItem("Status", res.statusCode.toString(), color = when(res.statusCode) { in 200..299 -> Color(0xFF22C55E); in 400..499 -> Color(0xFFFB923C); else -> Color(0xFFEF4444) })
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { vm.selectIntruderResult(null) }) { Text("Close") }
+                        }
                     }
                 }
             }
@@ -604,7 +626,7 @@ private fun DecoderTabWrapper(vm: TheRepeatorViewModel, context: Context) {
     val decoderOutput by vm.decoderOutput.collectAsState()
     val decoderSteps by vm.decoderSteps.collectAsState()
     val scope = rememberCoroutineScope()
-    DecoderTab(input = decoderInput, output = decoderOutput, steps = decoderSteps, onInputChange = { vm.updateDecoderInput(it) }, onAddStep = { vm.addDecoderStep(it) }, onRemoveStep = { vm.removeDecoderStep(it) }, onClear = { vm.clearDecoder() }, onSwap = { vm.swapDecoder() }, onCopy = { copyToClipboard(context, it, scope) }, onMoveStep = { id, up -> vm.moveDecoderStep(id, up) })
+    DecoderTab(input = decoderInput, output = decoderOutput, steps = decoderSteps, onInputChange = { vm.updateDecoderInput(it) }, onAddStep = { vm.addDecoderStep(it) }, onRemoveStep = { vm.removeDecoderStep(it) }, onClear = { vm.clearDecoder() }, onSwap = { vm.swapDecoder() }, onCopy = { copyToClipboard(context, it, scope) }, onMoveStep = { id, up -> vm.moveDecoderStep(id, up) }, onEncodeJwt = { h, p -> vm.updateDecoderInput(vm.encodeJwt(h, p)) })
 }
 
 @Composable
@@ -671,9 +693,9 @@ private fun ComparerTabWrapper(vm: TheRepeatorViewModel) {
 
 private fun copyToClipboard(context: Context, text: String, scope: CoroutineScope) { 
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val safeText = if (text.length > 100_000) {
-        android.widget.Toast.makeText(context, "Content truncated for clipboard (100KB limit)", android.widget.Toast.LENGTH_SHORT).show()
-        text.take(100_000) + "\n\n[...TRUNCATED DUE TO SIZE...]"
+    val safeText = if (text.length > 5_000_000) {
+        Toast.makeText(context, "Content truncated for clipboard (5MB limit)", Toast.LENGTH_SHORT).show()
+        text.take(5_000_000) + "\n\n[...TRUNCATED DUE TO SIZE...]"
     } else {
         text
     }
@@ -695,7 +717,7 @@ private fun copyToClipboard(context: Context, text: String, scope: CoroutineScop
             } else {
                 clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
             }
-            android.widget.Toast.makeText(context, "Clipboard cleared for security", android.widget.Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Clipboard cleared for security", Toast.LENGTH_SHORT).show()
         }
     }
 }
@@ -1123,13 +1145,14 @@ private fun BottomBarTabs(
     
     Surface(
         color = Color(0xFF111827),
-        modifier = Modifier.fillMaxWidth().navigationBarsPadding()
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().height(60.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(modifier = Modifier.navigationBarsPadding()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().height(60.dp),
+                horizontalArrangement = Arrangement.SpaceAround,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             footerTabs.forEach { (_, icon, index) ->
                 val isSelected = selectedTab == index
                 val hasBadge = (index == 0 && hasNewRepeater) || (index == 1 && hasNewIntruder)
@@ -1170,6 +1193,7 @@ private fun BottomBarTabs(
             }
         }
     }
+}
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -1471,7 +1495,10 @@ private fun BrowserTab(
     
     LaunchedEffect(webView.url) {
         webView.url?.let { 
-            if (it != "about:blank") urlText = it
+            if (it != "about:blank") {
+                urlText = it
+                isUrlBarVisible = true
+            }
         }
     }
 
@@ -1496,9 +1523,9 @@ private fun BrowserTab(
             lastBackClickTime = currentTime
             
             if (backClickCount >= 3) {
-                (context as? android.app.Activity)?.finish()
+                (context as? Activity)?.finish()
             } else {
-                android.widget.Toast.makeText(context, "Press back ${3 - backClickCount} more times to exit", android.widget.Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Press back ${3 - backClickCount} more times to exit", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1591,20 +1618,31 @@ private fun BrowserTab(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     AndroidView(
-                        factory = { webView }, 
-                        update = { 
-                            it.setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
-                                val canScrollDown = v.canScrollVertically(1)
-                                val canScrollUp = v.canScrollVertically(-1)
-                                
-                                if (scrollY > oldScrollY && scrollY > 150 && canScrollDown) {
-                                    isUrlBarVisible = false
-                                } else if (scrollY < oldScrollY && canScrollUp) {
-                                    isUrlBarVisible = true
-                                } else if (!canScrollUp) {
-                                    isUrlBarVisible = true
+                        factory = { _ ->
+                            webView.apply {
+                                setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
+                                    if (isUrlFocused) return@setOnScrollChangeListener
+                                    val canScrollDown = v.canScrollVertically(1)
+                                    val canScrollUp = v.canScrollVertically(-1)
+                                    val delta = scrollY - oldScrollY
+                                    
+                                    // Use a threshold to avoid jitter and "dancing"
+                                    if (Math.abs(delta) > 20) {
+                                        if (delta > 0 && scrollY > 150 && canScrollDown) {
+                                            if (isUrlBarVisible) isUrlBarVisible = false
+                                        } else if (delta < 0) {
+                                            if (!isUrlBarVisible) isUrlBarVisible = true
+                                        }
+                                    }
+                                    
+                                    // Force show at boundaries to stop feedback loops
+                                    if (!canScrollUp || !canScrollDown) {
+                                        if (!isUrlBarVisible) isUrlBarVisible = true
+                                    }
                                 }
                             }
+                        }, 
+                        update = { 
                             it.requestFocus()
                         }, 
                         modifier = Modifier.fillMaxSize()
@@ -1746,24 +1784,29 @@ private fun InterceptView(
                             text = headerText,
                             searchQuery = "",
                             context = context,
-                            isExpanded = isExpandedFull
+                            isExpanded = isExpandedFull,
+                            onToggleExpand = { isExpandedFull = !isExpandedFull }
                         )
                     }
                 }
             }
 
-            Row(modifier = Modifier.fillMaxWidth().padding(8.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onForward(editedRequestText.text); showDetail = false; isExpandedFull = false }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E))) {
-                    Text("Forward")
-                }
-                Button(onClick = { 
-                    viewModel.addRepeaterTab("Int", editedRequestText.text)
-                    android.widget.Toast.makeText(context, "Sent to Repeater", android.widget.Toast.LENGTH_SHORT).show()
-                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) {
-                    Text("Repeater")
-                }
-                Button(onClick = { onDrop(); showDetail = false; isExpandedFull = false }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))) {
-                    Text("Drop")
+            Surface(color = Color(0xFF111827)) {
+                Column(modifier = Modifier.navigationBarsPadding()) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onForward(editedRequestText.text); showDetail = false; isExpandedFull = false }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E))) {
+                            Text("Forward")
+                        }
+                        Button(onClick = { 
+                            viewModel.addRepeaterTab("Int", editedRequestText.text)
+                                Toast.makeText(context, "Sent to Repeater", Toast.LENGTH_SHORT).show()
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) {
+                            Text("Repeater")
+                        }
+                        Button(onClick = { onDrop(); showDetail = false; isExpandedFull = false }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))) {
+                            Text("Drop")
+                        }
+                    }
                 }
             }
         }
@@ -1896,8 +1939,11 @@ private fun WebSocketTab(messages: List<WebSocketMessage>, state: String, onConn
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, onInputChange: (String) -> Unit, onAddStep: (DecoderTransformType) -> Unit, onRemoveStep: (String) -> Unit, onClear: () -> Unit, onSwap: () -> Unit, onCopy: (String) -> Unit, onMoveStep: (String, Boolean) -> Unit) {
-    var showAddMenu by remember { mutableStateOf(false) }; val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, onInputChange: (String) -> Unit, onAddStep: (DecoderTransformType) -> Unit, onRemoveStep: (String) -> Unit, onClear: () -> Unit, onSwap: () -> Unit, onCopy: (String) -> Unit, onMoveStep: (String, Boolean) -> Unit, onEncodeJwt: (String, String) -> Unit) {
+    var showAddMenu by remember { mutableStateOf(false) }
+    var showJwtEditor by remember { mutableStateOf(false) }
+    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    
     Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("Decoder / Encoder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp); Row { IconButton(onClick = { val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""; onInputChange(clip) }) { Icon(Icons.Default.ContentPaste, "Paste", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = { onCopy(output) }) { Icon(Icons.Default.ContentCopy, "Copy", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = onClear) { Icon(Icons.Default.Clear, "Clear", tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp)) } } }
         OutlinedTextField(input, onInputChange, modifier = Modifier.fillMaxWidth().height(120.dp), label = { Text("Input") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp))
@@ -1925,7 +1971,10 @@ private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, 
             SelectionContainer { 
                 Column(modifier = Modifier.padding(12.dp)) { 
                     if (output.startsWith("Header: {")) { 
-                        Text("JWT Claims Viewer", color = Color(0xFF7C3AED), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("JWT Claims Viewer", color = Color(0xFF7C3AED), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            IconButton(onClick = { showJwtEditor = true }) { Icon(Icons.Default.Edit, "Edit JWT", tint = Color.White, modifier = Modifier.size(18.dp)) }
+                        }
                         Spacer(Modifier.height(4.dp))
                         val parts = output.split("\nPayload: ")
                         if (parts.size == 2) {
@@ -1942,6 +1991,33 @@ private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, 
                 } 
             } 
         }
+    }
+
+    if (showJwtEditor) {
+        val parts = output.split("\nPayload: ")
+        var hText by remember { mutableStateOf(if (parts.isNotEmpty()) parts[0].replace("Header: ", "") else "") }
+        var pText by remember { mutableStateOf(if (parts.size >= 2) parts[1] else "") }
+        
+        AlertDialog(
+            onDismissRequest = { showJwtEditor = false },
+            containerColor = Color(0xFF111827),
+            title = { Text("Edit & Re-encode JWT", color = Color.White) },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Header (JSON)", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                    OutlinedTextField(hText, { hText = it }, modifier = Modifier.fillMaxWidth().height(100.dp), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
+                    Text("Payload (JSON)", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                    OutlinedTextField(pText, { pText = it }, modifier = Modifier.fillMaxWidth().height(150.dp), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
+                }
+            },
+            confirmButton = {
+                Button(onClick = { 
+                    onEncodeJwt(hText, pText)
+                    showJwtEditor = false
+                }) { Text("Encode & Update Input") }
+            },
+            dismissButton = { TextButton(onClick = { showJwtEditor = false }) { Text("Cancel") } }
+        )
     }
 }
 
@@ -2057,73 +2133,63 @@ private fun RenderLargeText(
     searchQuery: String,
     context: Context,
     isExpanded: Boolean,
+    onToggleExpand: (() -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
     currentMatchIndex: Int = 0,
     onMatchesFound: (List<Int>) -> Unit = {},
     showCopyFull: Boolean = true
 ) {
-    val maxChars = if (isExpanded) 10_000_000 else 2_000_000
-    val isActuallyTruncated = text.length > maxChars
+    // High-performance "Lite" viewer for potentially massive text
+    val displayLimit = if (isExpanded) 100_000_000 else 550_000
+    val totalChars = minOf(text.length, displayLimit)
+    val isActuallyTruncated = text.length > displayLimit
     
-    val displayContent = remember(text, isExpanded) {
-        if (isActuallyTruncated) text.take(maxChars) else text
-    }
-
-    val lines = remember(displayContent) { 
-        displayContent.split("\n")
-    }
+    val chunkSize = 20_000
+    val numChunks = (totalChars + chunkSize - 1) / chunkSize
     
-    // Find all occurrences within lines
-    val matchOccurrences = remember(lines, searchQuery) {
-        if (searchQuery.isEmpty()) emptyList()
+    // Memory-safe search: we index matches without copying the whole string
+    val matchOccurrences = remember(text, searchQuery, displayLimit) {
+        if (searchQuery.isEmpty() || text.isEmpty()) emptyList()
         else {
-            val list = mutableListOf<Pair<Int, Int>>()
-            lines.forEachIndexed { lineIdx, line ->
-                var start = 0
-                while (true) {
-                    val found = line.indexOf(searchQuery, start, ignoreCase = true)
-                    if (found == -1) break
-                    list.add(lineIdx to found)
-                    start = found + searchQuery.length
-                }
+            val list = mutableListOf<Int>()
+            var start = 0
+            while (start < totalChars) {
+                val found = text.indexOf(searchQuery, start, ignoreCase = true)
+                if (found == -1 || found >= totalChars) break
+                list.add(found)
+                start = found + searchQuery.length
+                if (list.size > 2000) break // Safety ceiling
             }
             list
         }
     }
 
     LaunchedEffect(matchOccurrences) {
-        // Return only the distinct line indices for external scrolling logic if needed,
-        // but for internal display we use the full list size.
-        onMatchesFound(List(matchOccurrences.size) { it }) 
+        onMatchesFound(matchOccurrences) 
     }
 
     LaunchedEffect(currentMatchIndex, matchOccurrences) {
         if (matchOccurrences.isNotEmpty() && currentMatchIndex in matchOccurrences.indices) {
-            val (lineIdx, _) = matchOccurrences[currentMatchIndex]
-            listState.animateScrollToItem(lineIdx)
+            val charOffset = matchOccurrences[currentMatchIndex]
+            val chunkIdx = charOffset / chunkSize
+            listState.animateScrollToItem(chunkIdx)
         }
     }
 
-    val showScrollToBottom by remember {
-        derivedStateOf {
-            listState.firstVisibleItemIndex < maxOf(0, lines.size - 10)
-        }
-    }
-    
     val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
         if (isActuallyTruncated) {
             Card(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(8.dp).clickable(enabled = onToggleExpand != null) { onToggleExpand?.invoke() },
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFFACC15).copy(alpha = 0.1f))
             ) {
                 Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Warning, null, tint = Color(0xFFFACC15), modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "Content truncated to ${formatSize(maxChars)} for performance. ${if (!isExpanded) "Expand for more." else ""}",
+                        "Content truncated to ${formatSize(totalChars)} for performance. ${if (!isExpanded) "Click to expand." else ""}",
                         color = Color(0xFFFACC15),
                         fontSize = 11.sp
                     )
@@ -2131,52 +2197,40 @@ private fun RenderLargeText(
             }
         }
 
-        val useSyntaxHighlighting = displayContent.length < 10_000_000
+        val useSyntaxHighlighting = totalChars < 500_000 // Performance ceiling for colors
         
         SelectionContainer { 
             LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
-                itemsIndexed(lines, key = { index, _ -> index }) { index, line ->
-                    val displayLine = remember(line) { 
-                        if (line.length > 10_000) line.take(10_000) + " ... [LINE TRUNCATED]" else line 
-                    }
+                items(numChunks) { index ->
+                    val start = index * chunkSize
+                    val end = minOf(start + chunkSize, totalChars)
+                    val chunk = remember(text, start, end) { text.substring(start, end) }
                     
-                    if (searchQuery.isNotEmpty() && displayLine.contains(searchQuery, ignoreCase = true)) {
-                        val annotatedString = remember(displayLine, searchQuery, currentMatchIndex, matchOccurrences) {
-                            buildAnnotatedString {
-                                var start = 0
-                                var matchInLineIdx = 0
-                                while (start < displayLine.length) {
-                                    val matchIdx = displayLine.indexOf(searchQuery, start, ignoreCase = true)
-                                    if (matchIdx == -1) { append(displayLine.substring(start)); break }
-                                    append(displayLine.substring(start, matchIdx))
-                                    
-                                    // Check if this specific occurrence is the one selected
-                                    val isCurrentGlobal = matchOccurrences.getOrNull(currentMatchIndex) == (index to matchIdx)
-                                    
-                                    val bgColor = if (isCurrentGlobal) Color(0xFF7C3AED) else Color(0xFFFACC15).copy(alpha = 0.8f)
-                                    val textColor = if (isCurrentGlobal) Color.White else Color.Black
-                                    withStyle(style = SpanStyle(background = bgColor, color = textColor)) {
-                                        append(displayLine.substring(matchIdx, matchIdx + searchQuery.length))
-                                    }
-                                    start = matchIdx + searchQuery.length
-                                    matchInLineIdx++
+                    if (searchQuery.isNotEmpty() && chunk.contains(searchQuery, ignoreCase = true)) {
+                        val annotatedString = buildAnnotatedString {
+                            var s = 0
+                            while (s < chunk.length) {
+                                val matchIdx = chunk.indexOf(searchQuery, s, ignoreCase = true)
+                                if (matchIdx == -1) { append(chunk.substring(s)); break }
+                                append(chunk.substring(s, matchIdx))
+                                withStyle(style = SpanStyle(background = Color(0xFFFACC15).copy(alpha = 0.8f), color = Color.Black)) {
+                                    append(chunk.substring(matchIdx, matchIdx + searchQuery.length))
                                 }
+                                s = matchIdx + searchQuery.length
                             }
                         }
                         Text(annotatedString, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     } else {
-                        val annotatedLine = remember(displayLine, useSyntaxHighlighting) {
-                            if (useSyntaxHighlighting) highlightSyntax(displayLine) else AnnotatedString(displayLine)
-                        }
-                        Text(annotatedLine, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
+                        Text(if (useSyntaxHighlighting) highlightSyntax(chunk) else AnnotatedString(chunk), color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     }
                 }
+                
                 if (isActuallyTruncated) {
                     item {
                         Text(
                             "\n[... CONTENT TRUNCATED ...]\n",
                             color = Color(0xFF94A3B8),
-                            modifier = Modifier.padding(8.dp),
+                            modifier = Modifier.padding(8.dp).fillMaxWidth(),
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
                     }
@@ -2185,41 +2239,14 @@ private fun RenderLargeText(
         }
         
         if (showCopyFull) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-                    .then(if (isExpanded) Modifier.navigationBarsPadding() else Modifier),
-                horizontalArrangement = Arrangement.End
-            ) {
-                Button(
-                    onClick = { copyToClipboard(context, text, scope) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937))
-                ) {
+            Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.End) {
+                Button(onClick = { copyToClipboard(context, text, scope) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937))) {
                     Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Copy Full")
                 }
             }
         }
-        }
-
-        if (showScrollToBottom && isExpanded) {
-            val scope = rememberCoroutineScope()
-            SmallFloatingActionButton(
-                onClick = { 
-                    scope.launch { 
-                        if (lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1) 
-                    } 
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(bottom = 100.dp, end = 20.dp),
-                containerColor = Color(0xFF7C3AED).copy(alpha = 0.9f),
-                contentColor = Color.White
-            ) {
-                Icon(Icons.Default.KeyboardDoubleArrowDown, null, modifier = Modifier.size(20.dp))
-            }
         }
     }
 }
@@ -2246,7 +2273,7 @@ private fun HistoryDetailView(
 
     @Composable
     fun MainContent(modifier: Modifier = Modifier) {
-        Column(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(modifier = modifier.fillMaxSize().background(Color(0xFF0B1020))) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2258,7 +2285,7 @@ private fun HistoryDetailView(
                     }
                     Column {
                         Text("${summary.method} Detail", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        if (isExpandedFull) Text(summary.url, color = Color.Gray, fontSize = 10.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        Text(summary.url, color = Color(0xFF7C3AED), fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     }
                 }
                 Row {
@@ -2266,6 +2293,9 @@ private fun HistoryDetailView(
                         IconButton(onClick = { isBeautified = !isBeautified }) {
                             Icon(Icons.Default.AutoFixHigh, null, tint = if (isBeautified) Color(0xFF7C3AED) else Color.White)
                         }
+                    }
+                    IconButton(onClick = { if (isExpandedFull) isExpandedFull = false else onBack() }) { 
+                        Icon(Icons.Default.Close, null, tint = Color.White) 
                     }
                 }
             }
@@ -2288,7 +2318,7 @@ private fun HistoryDetailView(
                 Tab(selected = detailTab == 1, onClick = { scope.launch { pagerState.animateScrollToPage(1) } }, text = { Text("Response") })
             }
 
-            if (detailTab == 0) {
+            if (detailTab == 0 && !isLoading) {
                 Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     CustomTextField(
                         searchQuery,
@@ -2300,6 +2330,35 @@ private fun HistoryDetailView(
                         Modifier.weight(1f),
                         leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(16.dp)) }
                     )
+                    if (searchQuery.isNotEmpty()) {
+                        Text(
+                            "${if (matchIndices.isEmpty()) 0 else currentMatchIndex + 1}/${matchIndices.size}",
+                            color = Color.Gray,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                        IconButton(
+                            onClick = { 
+                                if (currentMatchIndex > 0) currentMatchIndex-- 
+                                else if (matchIndices.isNotEmpty()) currentMatchIndex = matchIndices.size - 1 
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowUp, null, tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { 
+                                if (currentMatchIndex < matchIndices.size - 1) currentMatchIndex++ 
+                                else currentMatchIndex = 0 
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
+                        }
+                    }
+                    IconButton(onClick = { isExpandedFull = !isExpandedFull }, modifier = Modifier.size(32.dp)) {
+                        Icon(if (isExpandedFull) Icons.Default.FullscreenExit else Icons.Default.Fullscreen, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
                 }
             }
 
@@ -2307,7 +2366,6 @@ private fun HistoryDetailView(
                 if (isLoading) {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.Center), color = Color(0xFF7C3AED))
                 } else {
-                    // Disable horizontal swipe when in Response tab to allow vertical scrolling of Pretty view
                     HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = detailTab == 0) { page ->
                         if (page == 0) {
                             RenderLargeText(
@@ -2315,6 +2373,7 @@ private fun HistoryDetailView(
                                 searchQuery = searchQuery, 
                                 context = context, 
                                 isExpanded = isExpandedFull,
+                                onToggleExpand = { isExpandedFull = !isExpandedFull },
                                 listState = requestListState,
                                 currentMatchIndex = currentMatchIndex,
                                 onMatchesFound = { matchIndices = it }
@@ -2336,49 +2395,47 @@ private fun HistoryDetailView(
             }
             
             if (!isLoading) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF111827))
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(onClick = { 
-                        vm.addRepeaterTab("H", vm.getRawFromTheRepeatorRequest(detail))
-                        android.widget.Toast.makeText(context, "Sent to Repeater", android.widget.Toast.LENGTH_SHORT).show()
-                        if (isExpandedFull) isExpandedFull = false else onBack() 
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("To Repeater", fontSize = 12.sp) }
-                    Button(onClick = { 
-                        vm.sendToIntruder(vm.getRawFromTheRepeatorRequest(detail))
-                        android.widget.Toast.makeText(context, "Sent to Intruder", android.widget.Toast.LENGTH_SHORT).show()
-                        if (isExpandedFull) isExpandedFull = false else onBack() 
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Intruder", fontSize = 12.sp) }
-                    Button(onClick = { 
-                        vm.sendHistoryToComparerSmart(detail.id)
-                        android.widget.Toast.makeText(context, "Sent to Comparer", android.widget.Toast.LENGTH_SHORT).show()
-                        if (isExpandedFull) isExpandedFull = false else onBack() 
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Comparer", fontSize = 12.sp) }
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { 
+                            vm.addRepeaterTab("H", vm.getRawFromTheRepeatorRequest(detail))
+                            Toast.makeText(context, "Sent to Repeater", Toast.LENGTH_SHORT).show()
+                            if (isExpandedFull) isExpandedFull = false else onBack() 
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("To Repeater", fontSize = 12.sp) }
+                        Button(onClick = { 
+                            vm.sendToIntruder(vm.getRawFromTheRepeatorRequest(detail))
+                            Toast.makeText(context, "Sent to Intruder", Toast.LENGTH_SHORT).show()
+                            if (isExpandedFull) isExpandedFull = false else onBack() 
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Intruder", fontSize = 12.sp) }
+                        Button(onClick = { 
+                            vm.sendHistoryToComparerSmart(detail.id)
+                            Toast.makeText(context, "Sent to Comparer", Toast.LENGTH_SHORT).show()
+                            if (isExpandedFull) isExpandedFull = false else onBack() 
+                        }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))) { Text("To Comparer", fontSize = 12.sp) }
+                    }
+                    
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        StatItem("Length", formatSize(detail.bodyLength))
+                        StatItem("Status", detail.statusCode.toString(), color = when(detail.statusCode) { in 200..299 -> Color(0xFF22C55E); in 400..499 -> Color(0xFFFB923C); else -> Color(0xFFEF4444) })
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { if (isExpandedFull) isExpandedFull = false else onBack() }) { Text("Close") }
+                    }
                 }
-                Spacer(Modifier.navigationBarsPadding())
             }
         }
     }
 
     if (isExpandedFull) {
         Dialog(onDismissRequest = { isExpandedFull = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Scaffold(
-                containerColor = Color(0xFF0B1020),
-                contentWindowInsets = WindowInsets.systemBars
-            ) { padding ->
-                Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-                    MainContent()
-                }
+            Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0B1020)) {
+                MainContent(modifier = Modifier.systemBarsPadding())
             }
         }
     } else {
-        MainContent()
+        MainContent(modifier = Modifier.systemBarsPadding())
     }
 }
+
 
 private object SyntaxColors {
     val JsonKey = Color(0xFFFB923C)
@@ -2569,6 +2626,7 @@ private fun ResponseSection(
                     searchQuery = searchQuery, 
                     context = context, 
                     isExpanded = currentIsExpanded,
+                    onToggleExpand = toggleAction,
                     listState = listStates[page],
                     currentMatchIndex = currentMatchIndices[page].intValue,
                     onMatchesFound = { matchIndicesList[page].value = it },
@@ -2583,11 +2641,18 @@ private fun ResponseSection(
             onDismissRequest = { internalIsExpanded = false },
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
+            val view = LocalView.current
+            DisposableEffect(Unit) {
+                val window = (view.parent as? android.view.Window) ?: (view.context as? Activity)?.window
+                window?.let { WindowCompat.setDecorFitsSystemWindows(it, false) }
+                onDispose {}
+            }
+
             Scaffold(
                 containerColor = Color(0xFF0B1020),
-                contentWindowInsets = WindowInsets.systemBars
+                contentWindowInsets = WindowInsets(0, 0, 0, 0)
             ) { padding ->
-                Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize().padding(padding).systemBarsPadding()) {
                     Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("Response Full View", color = Color.White, fontWeight = FontWeight.Bold)
                         IconButton(onClick = { internalIsExpanded = false }) { Icon(Icons.Default.Close, null, tint = Color.White) }
@@ -2605,7 +2670,6 @@ private fun ResponseSection(
                         modifier = Modifier.weight(1f),
                         showCopyFull = showCopyFull
                     )
-                    Spacer(Modifier.navigationBarsPadding())
                 }
             }
         }
@@ -2615,9 +2679,12 @@ private fun ResponseSection(
 private val syntaxRegex = Regex("""(".*?")(\s*:)?|(\b\d+\b)|([{}\[\]])|(\btrue\b|\bfalse\b|\bnull\b)|(<[^>]+>)""")
 
 private fun highlightSyntax(line: String): AnnotatedString {
-    if (line.length > 5000) return AnnotatedString(line)
+    // Increased performance threshold for better "Pretty" colors
+    if (line.length > 50_000) return AnnotatedString(line)
+    
     return buildAnnotatedString {
         var start = 0
+        // Robust JSON/HTML regex for high-performance syntax highlighting
         val matches = syntaxRegex.findAll(line)
         for (m in matches) {
             append(line.substring(start, m.range.first))

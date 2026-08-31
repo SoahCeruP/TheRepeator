@@ -18,6 +18,7 @@ import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 import java.util.*
 import kotlin.time.Duration.Companion.milliseconds
 import java.util.concurrent.TimeUnit
@@ -37,6 +38,36 @@ import javax.net.ssl.X509TrustManager
 class TheRepeatorViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
     private val repository = TheRepeatorRepository(database.requestDao(), database.intruderResultDao(), database.browserHistoryDao())
+
+    private val MAX_BODY_SIZE = 50_000_000L // 50MB safety limit for "Full" response
+
+    private fun formatSize(bytes: Int): String {
+        return when {
+            bytes >= 1024 * 1024 -> String.format(Locale.US, "%.2f MB", bytes.toDouble() / (1024 * 1024))
+            bytes >= 1024 -> String.format(Locale.US, "%.2f KB", bytes.toDouble() / 1024)
+            else -> "$bytes B"
+        }
+    }
+
+    private fun readResponseBodySafely(body: ResponseBody?, limit: Long = MAX_BODY_SIZE): Pair<String, Int> {
+        if (body == null) return "" to 0
+        return try {
+            val source = body.source()
+            source.request(limit)
+            val buffer = source.buffer
+            val actualBodyLength = body.contentLength().takeIf { it != -1L } ?: buffer.size
+            val isTruncated = (body.contentLength() > limit) || (body.contentLength() == -1L && buffer.size >= limit)
+            
+            val bytesToRead = minOf(buffer.size, limit)
+            val bytes = buffer.clone().readByteArray(bytesToRead)
+            val content = String(bytes, StandardCharsets.UTF_8)
+            
+            val finalContent = if (isTruncated) "$content\n\n[... CONTENT TRUNCATED AT ${formatSize(limit.toInt())} FOR PERFORMANCE ...]" else content
+            finalContent to actualBodyLength.toInt()
+        } catch (e: Exception) {
+            "Error reading body: ${e.message}" to 0
+        }
+    }
 
     data class ParsedRequest(val method: String, val url: String, val headers: Map<String, String>, val body: String)
 
@@ -141,8 +172,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     init {
         viewModelScope.launch {
-            // As a security tool, we clear session data (Requests & Intruder) on startup.
-            // Only Browser History is kept as per user request.
+            // Cleanup session data on startup
             repository.clearHistory()
             repository.clearAllIntruderResults()
         }
@@ -322,7 +352,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         val isUnsafe = authorizedInsecureDomains.value.contains(host)
         val base = if (isUnsafe) unsafeOkHttpClient else baseOkHttpClient
         
-        return if (followRedirects) base else base.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        return if (followRedirects) base else base.newBuilder().followRedirects(followRedirects = false).followSslRedirects(followProtocolRedirects = false).build()
     }
 
     private val repeaterBaseClient = baseOkHttpClient.newBuilder()
@@ -331,8 +361,8 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         .build()
 
     private val repeaterUnsafeClient = unsafeOkHttpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
+        .followRedirects(followRedirects = false)
+        .followSslRedirects(followProtocolRedirects = false)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -486,7 +516,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun prettifyBody(body: String): String {
-        if (body.isBlank() || (body.length > 2_000_000)) return body
+        if (body.isBlank()) return body
         val tb = body.trim()
         return try {
             if (tb.startsWith("{") || tb.startsWith("[")) {
@@ -625,8 +655,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
                 
-                val state = _intruderState.value
-                val concurrency = state.concurrency.coerceAtLeast(1)
+                val concurrency = _intruderState.value.concurrency.coerceAtLeast(1)
                 
                 // Bounded payload channel for the producer-consumer pattern
                 val payloadChannel = Channel<Pair<Int, String>>(capacity = concurrency * 4)
@@ -634,8 +663,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 // Producer coroutine: streams payloads and feeds the channel
                 val producerJob = launch {
                     try {
-                        if (state.payloadFileUri != null) {
-                            val uri = state.payloadFileUri.toUri()
+                        val producerState = _intruderState.value
+                        if (producerState.payloadFileUri != null) {
+                            val uri = producerState.payloadFileUri.toUri()
                             getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
                                 stream.bufferedReader().useLines { lines ->
                                     lines.forEachIndexed { index, line ->
@@ -647,7 +677,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                                 }
                             }
                         } else {
-                            state.payloads.forEachIndexed { index, p ->
+                            producerState.payloads.forEachIndexed { index, p ->
                                 if (index >= startIdx) {
                                     if (!isActive) return@forEachIndexed
                                     payloadChannel.send(Pair(index, p))
@@ -662,10 +692,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 }
 
                 // Estimate total
-                val totalEstimate = if (state.payloadFileUri != null) {
-                    state.stats.totalPayloads.takeIf { it > 0 } ?: 1000000 
+                val totalEstimate = if (_intruderState.value.payloadFileUri != null) {
+                    _intruderState.value.stats.totalPayloads.takeIf { it > 0 } ?: 1000000 
                 } else {
-                    state.payloads.size
+                    _intruderState.value.payloads.size
                 }
 
                 _intruderState.update { it.copy(stats = it.stats.copy(totalPayloads = totalEstimate, processedCount = startIdx, currentIndex = startIdx)) }
@@ -732,113 +762,163 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
                 
-                // RPS Token bucket
-                val tokenChannel = if (state.rps > 0) Channel<Unit>(capacity = 0) else null
-                val tickerJob = if (tokenChannel != null) {
-                    launch {
-                        val intervalNanos = 1_000_000_000L / state.rps
-                        var nextReleaseNanos = System.nanoTime()
-                        while (isActive) {
-                            if (_intruderState.value.status == IntruderStatus.RUNNING) {
-                                tokenChannel.send(Unit)
-                            }
-                            nextReleaseNanos += intervalNanos
-                            val waitNanos = nextReleaseNanos - System.nanoTime()
-                            if (waitNanos > 0) delay((waitNanos / 1_000_000).milliseconds)
-                            else if (waitNanos < -intervalNanos * 10) nextReleaseNanos = System.nanoTime()
-                        }
-                    }
-                } else null
-
-                // Consumer workers
-                val workers = List(concurrency) {
-                    launch {
-                        for (next in payloadChannel) {
-                            if (!isActive) break
-                            val (absIdx, p) = next
-                            
-                            tokenChannel?.receive()
-                            
-                            while (_intruderState.value.status == IntruderStatus.PAUSED && isActive) { delay(500.milliseconds) }
-                            if (!isActive || _intruderState.value.status != IntruderStatus.RUNNING) break
-                            
+                // RPS Token bucket - capacity 1 to allow small burst
+                val tokenChannel = Channel<Unit>(capacity = 50)
+                val tickerJob = launch {
+                    var nextReleaseNanos = System.nanoTime()
+                    while (isActive) {
+                        val currentRps = _intruderState.value.rps.coerceAtLeast(1)
+                        val intervalNanos = 1_000_000_000L / currentRps
+                        
+                        if (_intruderState.value.status == IntruderStatus.RUNNING) {
                             try {
-                                var payload = p
-                                if (state.decodeBase64) {
-                                    try {
-                                        payload = String(Base64.decode(payload, Base64.DEFAULT))
-                                    } catch (_: Exception) {
-                                        android.util.Log.e("Intruder", "Base64 decode failed for: $payload")
-                                    }
-                                }
-                                if (state.encodeUrl) {
-                                    try {
-                                        // Standard URLEncoder encodes space as + which is for form-data. 
-                                        // Most users expect %20 and full encoding of special chars.
-                                        payload = URLEncoder.encode(payload, "UTF-8").replace("+", "%20")
-                                    } catch (_: Exception) {
-                                        android.util.Log.e("Intruder", "URL encode failed for: $payload")
-                                    }
-                                }
-                                val rawP = payload
-                                
-                                val baseReq = if (template.contains("§")) {
-                                    val pairRegex = "§.*?§".toRegex()
-                                    if (pairRegex.containsMatchIn(template)) {
-                                        template.replace(pairRegex, java.util.regex.Matcher.quoteReplacement(rawP))
-                                    } else {
-                                        template.replace("§", rawP)
-                                    }
-                                } else {
-                                    template
-                                }
-                                
-                                val finalReq = applyRules(replaceVariables(baseReq))
-                                val startTime = System.currentTimeMillis()
-                                
-                                try {
-                                    val parsed = parseRawRequest(finalReq)
-                                    val builder = Request.Builder().url(parsed.url)
-                                    parsed.headers.forEach { (k, v) -> 
-                                        val lowerK = k.lowercase()
-                                        if (lowerK != "host" && lowerK != "content-length") {
-                                            try { builder.addHeader(k, v) } catch(_: Exception) {}
-                                        }
-                                    }
-                                    val contentType = parsed.headers.entries.find { it.key.equals("Content-Type", ignoreCase = true) }?.value
-                                    val mediaType = contentType?.toMediaTypeOrNull()
-                                    val reqBody = createRequestBody(parsed.method, parsed.body, mediaType)
-                                    
-                                    getIntruderHttpClient(parsed.url).newCall(builder.method(parsed.method, reqBody).build()).execute().use { resp ->
-                                        val rb = resp.body?.string() ?: ""
-                                        val storedResponse = if (rb.length > 200_000) rb.take(200_000) + "\n\n[... RESPONSE TRUNCATED IN STORAGE ...]" else rb
-                                        val result = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = resp.code, length = rb.length, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "HTTP ${resp.code}\n${resp.headers}\n$storedResponse")
-                                        if (isActive) {
-                                            resultsChannel.send(result)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    val errResult = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = 0, length = 0, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "Error: ${e.message}")
-                                    if (isActive) {
-                                        resultsChannel.send(errResult)
-                                    }
-                                }
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) { 
-                                android.util.Log.e("Intruder", "Worker Task Error", e)
-                            }
+                                tokenChannel.send(Unit)
+                            } catch (_: Exception) { break }
+                        } else {
+                            // When paused, don't block. Just wait a bit.
+                            delay(100.milliseconds)
+                            continue
+                        }
+                        
+                        nextReleaseNanos += intervalNanos
+                        val now = System.nanoTime()
+                        val waitNanos = nextReleaseNanos - now
+                        
+                        if (waitNanos > 0) {
+                            delay((waitNanos / 1_000_000).milliseconds)
+                        } else if (waitNanos < -intervalNanos * 10) {
+                            nextReleaseNanos = now
                         }
                     }
                 }
 
+                // Dynamic worker management
+                val activeWorkersMap = mutableMapOf<Int, Job>()
+                val workerManagerJob = launch {
+                    var workerIdCounter = 0
+                    while (isActive) {
+                        val targetConcurrency = _intruderState.value.concurrency.coerceAtLeast(1)
+                        
+                        // Remove finished workers
+                        val finished = activeWorkersMap.filter { !it.value.isActive }.keys
+                        finished.forEach { activeWorkersMap.remove(it) }
+
+                        // Reconcile worker count
+                        if (activeWorkersMap.size < targetConcurrency) {
+                            repeat(targetConcurrency - activeWorkersMap.size) {
+                                val id = workerIdCounter++
+                                val workerJob = launch {
+                                    for (next in payloadChannel) {
+                                        if (!isActive) break
+                                        val (absIdx, p) = next
+                                        
+                                        // Backpressure / RPS control
+                                        tokenChannel.receive()
+                                        
+                                        // Pause control
+                                        while (_intruderState.value.status == IntruderStatus.PAUSED && isActive) { 
+                                            delay(500.milliseconds) 
+                                        }
+                                        if (!isActive || _intruderState.value.status != IntruderStatus.RUNNING) {
+                                            if (_intruderState.value.status == IntruderStatus.CANCELLED) break
+                                        }
+                                        
+                                        try {
+                                            // Always use the latest settings from the state
+                                            val currentState = _intruderState.value
+                                            var payload = p
+                                            if (currentState.decodeBase64) {
+                                                try {
+                                                    payload = String(Base64.decode(payload, Base64.DEFAULT))
+                                                } catch (_: Exception) {}
+                                            }
+                                            if (currentState.encodeUrl) {
+                                                try {
+                                                    payload = URLEncoder.encode(payload, "UTF-8").replace("+", "%20")
+                                                } catch (_: Exception) {}
+                                            }
+                                            val rawP = payload
+                                            
+                                            val baseReq = if (template.contains("§")) {
+                                                val pairRegex = "§.*?§".toRegex()
+                                                if (pairRegex.containsMatchIn(template)) {
+                                                    template.replace(pairRegex, java.util.regex.Matcher.quoteReplacement(rawP))
+                                                } else {
+                                                    template.replace("§", rawP)
+                                                }
+                                            } else {
+                                                template
+                                            }
+                                            
+                                            val finalReq = applyRules(replaceVariables(baseReq))
+                                            val startTime = System.currentTimeMillis()
+                                            
+                                            try {
+                                                val parsed = parseRawRequest(finalReq)
+                                                val builder = Request.Builder().url(parsed.url)
+                                                parsed.headers.forEach { (k, v) -> 
+                                                    val lowerK = k.lowercase()
+                                                    if ((lowerK != "host") && (lowerK != "content-length")) {
+                                                        try { builder.addHeader(k, v) } catch(_: Exception) {}
+                                                    }
+                                                }
+                                                val contentType = parsed.headers.entries.find { it.key.equals("Content-Type", ignoreCase = true) }?.value
+                                                val mediaType = contentType?.toMediaTypeOrNull()
+                                                val reqBody = createRequestBody(parsed.method, parsed.body, mediaType)
+                                                
+                                                getIntruderHttpClient(parsed.url).newCall(builder.method(parsed.method, reqBody).build()).execute().use { resp ->
+                                                    val (rb, bodyLen) = readResponseBodySafely(resp.body)
+                                                    val result = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = resp.code, length = bodyLen, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "HTTP ${resp.code}\n${resp.headers}\n\n$rb")
+                                                    if (isActive) {
+                                                        resultsChannel.send(result)
+                                                    }
+                                                }
+                                            } catch (e: Exception) {
+                                                val errResult = IntruderResult(id = UUID.randomUUID().toString(), attackId = "default", resultIndex = absIdx, payload = rawP, statusCode = 0, length = 0, responseTime = System.currentTimeMillis() - startTime, request = finalReq, response = "Error: ${e.message}")
+                                                if (isActive) {
+                                                    resultsChannel.send(errResult)
+                                                }
+                                            }
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) { 
+                                            android.util.Log.e("Intruder", "Worker Task Error", e)
+                                        }
+                                    }
+                                }
+                                activeWorkersMap[id] = workerJob
+                            }
+                        } else if (activeWorkersMap.size > targetConcurrency) {
+                            // Gracefully reduce workers
+                            val toRemove = activeWorkersMap.size - targetConcurrency
+                            activeWorkersMap.keys.take(toRemove).forEach { id ->
+                                activeWorkersMap[id]?.cancel()
+                                activeWorkersMap.remove(id)
+                            }
+                        }
+                        
+                        delay(1000.milliseconds) // Re-check every second
+                    }
+                }
+
                 try {
-                    workers.joinAll()
-                    producerJob.cancelAndJoin()
+                    producerJob.join()
+                    payloadChannel.close()
+                    
+                    // Wait for all active workers with a safe timeout
+                    withTimeoutOrNull(10000.milliseconds) {
+                        while (activeWorkersMap.any { it.value.isActive }) {
+                            delay(200.milliseconds)
+                            activeWorkersMap.entries.removeIf { !it.value.isActive }
+                        }
+                    }
+                    
+                    workerManagerJob.cancelAndJoin()
                 } catch (e: Exception) {
-                    android.util.Log.e("Intruder", "Workers error", e)
+                    android.util.Log.e("Intruder", "Attack lifecycle error", e)
                 } finally {
-                    tickerJob?.cancel()
+                    tickerJob.cancel()
+                    tokenChannel.close()
                     resultsChannel.close()
                     collectorJob.join()
                     val finalStatus = when(_intruderState.value.status) {
@@ -923,10 +1003,22 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             val call = getOkHttpClient(finalUrl, followRedirects = false).newCall(builder.method(finalMethod, requestBody).build())
             val resp = withContext(Dispatchers.IO) { call.execute() }
             
-            val rawBytes = withContext(Dispatchers.IO) { resp.body?.bytes() } ?: byteArrayOf()
             val contentType = resp.header("Content-Type") ?: "text/html"
             val isBinary = isBinary(contentType)
-            val rb = if (isBinary) "[Binary Data]" else String(rawBytes, StandardCharsets.UTF_8)
+            
+            // For logging to history, we only peek a portion of the body to avoid OOM
+            val loggingLimit = 2_000_000L // 2MB for history logging
+            val source = resp.body?.source()
+            source?.request(loggingLimit)
+            val buffer = source?.buffer ?: okio.Buffer()
+            
+            val bodyLen = resp.body?.contentLength().takeIf { it != -1L } ?: buffer.size
+            val bytesForLogging = buffer.clone().readByteArray(minOf(buffer.size, loggingLimit))
+            
+            val rb = if (isBinary) "[Binary Data]" else {
+                val s = String(bytesForLogging, StandardCharsets.UTF_8)
+                if (bodyLen > loggingLimit) "$s\n\n[... TRUNCATED IN HISTORY ...]" else s
+            }
             
             val respHeaders = mutableMapOf<String, String>()
             resp.headers.forEach { (k, v) -> respHeaders[k] = v }
@@ -945,7 +1037,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 requestBody = finalBody ?: "",
                 requestHeadersJson = Json.encodeToString(finalHeaders),
                 responseHeadersJson = Json.encodeToString(respHeaders),
-                bodyLength = rawBytes.size,
+                bodyLength = bodyLen.toInt(),
             )
             if (isRequestInScope(req)) repository.addRequest(req)
             
@@ -962,7 +1054,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 resp.code, 
                 resp.message.ifEmpty { "OK" }, 
                 respHeaders, 
-                ByteArrayInputStream(rawBytes),
+                resp.body?.byteStream(), // Return original stream to WebView
             )
         } catch (e: Exception) { 
             val errorMsg = e.message ?: "Unknown Error"
@@ -1337,26 +1429,29 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     
                     val call = try { getRepeaterHttpClient(parsed.url).newCall(builder.method(parsed.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) getRepeaterHttpClient(parsed.url).newCall(builder.method(parsed.method, null).build()) else throw e }
                     call.execute().use { resp ->
-                        val rawBytes = resp.body?.bytes() ?: byteArrayOf()
+                        val (rb, bodyLen) = readResponseBodySafely(resp.body)
                         val contentType = resp.header("Content-Type") ?: "text/html"
-                        val rb = if (isBinary(contentType)) "[Binary Data]" else String(rawBytes, StandardCharsets.UTF_8)
+                        val isBinary = isBinary(contentType)
+                        
+                        val finalRb = if (isBinary) "[Binary Data]" else rb
+                        
                         val duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)
-                        val meta = ResponseMetadata(timing = duration, size = rawBytes.size, protocol = resp.protocol.toString(), tls = resp.handshake?.tlsVersion?.toString())
+                        val meta = ResponseMetadata(timing = duration, size = bodyLen, protocol = resp.protocol.toString(), tls = resp.handshake?.tlsVersion?.toString())
                         withContext(Dispatchers.Main) {
                             val currentTabs = _repeaterTabs.value.toMutableList()
                             if (idx in currentTabs.indices) {
-                                currentTabs[idx] = currentTabs[idx].copy(response = "HTTP ${resp.code}\n${resp.headers}\n$rb", redirectUrl = if (resp.code in 300..399) resp.header("Location") else null, isLoading = false, metadata = meta)
+                                currentTabs[idx] = currentTabs[idx].copy(response = "HTTP ${resp.code}\n${resp.headers}\n\n$finalRb", redirectUrl = if (resp.code in 300..399) resp.header("Location") else null, isLoading = false, metadata = meta)
                                 _repeaterTabs.value = currentTabs
                                 val req = TheRepeatorRequest(
                                     method = parsed.method, url = parsed.url, host = try { URL(parsed.url).host } catch(_: Exception) { "" }, 
                                     path = try { URL(parsed.url).path } catch(_: Exception) { "" }, statusCode = resp.code, protocol = resp.protocol.toString(), 
-                                    body = rb, 
+                                    body = finalRb, 
                                     headersJson = Json.encodeToString(resp.headers.toMap()), 
                                     timestamp = System.currentTimeMillis(),
                                     requestBody = parsed.body,
                                     requestHeadersJson = Json.encodeToString(parsed.headers),
                                     responseHeadersJson = Json.encodeToString(resp.headers.toMap()),
-                                    bodyLength = rawBytes.size,
+                                    bodyLength = bodyLen,
                                 )
                                 if (isRequestInScope(req)) repository.addRequest(req)
                             }
@@ -1409,13 +1504,14 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
             val body = if (p.body.isNotEmpty()) p.body.toRequestBody(p.headers["Content-Type"]?.toMediaTypeOrNull()) else if (listOf("POST", "PUT", "PATCH").contains(p.method)) "".toRequestBody(p.headers["Content-Type"]?.toMediaTypeOrNull()) else null
             val call = try { getOkHttpClient(p.url).newCall(builder.method(p.method, body).build()) } catch (e: IllegalArgumentException) { if (body != null) getOkHttpClient(p.url).newCall(builder.method(p.method, null).build()) else throw e }
             call.execute().use { resp ->
-                val rb = resp.body?.string() ?: ""; val full = "HTTP ${resp.code}\n${resp.headers}\n$rb"; val loc = if (resp.code in 300..399) resp.header("Location") else null
+                val (rb, bodyLen) = readResponseBodySafely(resp.body)
+                val full = "HTTP ${resp.code}\n${resp.headers}\n\n$rb"; val loc = if (resp.code in 300..399) resp.header("Location") else null
                 withContext(Dispatchers.Main) {
                     val cTabs = _repeaterTabs.value.toMutableList()
                     if (idx in cTabs.indices) {
-                        cTabs[idx] = cTabs[idx].copy(response = full, redirectUrl = loc, isLoading = false, metadata = ResponseMetadata(timing = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime), size = rb.length, protocol = resp.protocol.toString(), tls = resp.handshake?.tlsVersion?.toString()))
+                        cTabs[idx] = cTabs[idx].copy(response = full, redirectUrl = loc, isLoading = false, metadata = ResponseMetadata(timing = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime), size = bodyLen, protocol = resp.protocol.toString(), tls = resp.handshake?.tlsVersion?.toString()))
                         _repeaterTabs.value = cTabs
-                        val req = TheRepeatorRequest(method = p.method, url = p.url, host = try { URL(p.url).host } catch(_: Exception) { "" }, path = try { URL(p.url).path } catch(_: Exception) { "" }, statusCode = resp.code, protocol = resp.protocol.toString(), body = rb, headersJson = "{}", timestamp = System.currentTimeMillis(), bodyLength = rb.length)
+                        val req = TheRepeatorRequest(method = p.method, url = p.url, host = try { URL(p.url).host } catch(_: Exception) { "" }, path = try { URL(p.url).path } catch(_: Exception) { "" }, statusCode = resp.code, protocol = resp.protocol.toString(), body = rb, headersJson = "{}", timestamp = System.currentTimeMillis(), bodyLength = bodyLen)
                         if (isRequestInScope(req)) repository.addRequest(req)
                     }
                 }
@@ -1545,6 +1641,15 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     fun addDecoderStep(type: DecoderTransformType) { _decoderSteps.value += DecoderStep(type = type) }
     fun removeDecoderStep(id: String) { _decoderSteps.value = _decoderSteps.value.filter { it.id != id } }
+    
+    fun encodeJwt(header: String, payload: String): String {
+        return try {
+            val h = Base64.encodeToString(header.toByteArray(StandardCharsets.UTF_8), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+            val p = Base64.encodeToString(payload.toByteArray(StandardCharsets.UTF_8), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+            "$h.$p."
+        } catch (e: Exception) { "Error: ${e.message}" }
+    }
+
     fun moveDecoderStep(id: String, up: Boolean) {
         val current = _decoderSteps.value.toMutableList()
         val index = current.indexOfFirst { it.id == id }

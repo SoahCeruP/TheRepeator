@@ -26,7 +26,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "therepeator_encrypted_database"
+                    "therepeator_encrypted_database",
                 )
                 .openHelperFactory(factory)
                 .fallbackToDestructiveMigration()

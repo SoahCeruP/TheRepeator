@@ -23,7 +23,7 @@ data class TheRepeatorRequest(
     val responseBody: String? = null,
     val requestHeadersJson: String? = null,
     val responseHeadersJson: String? = null,
-    val bodyLength: Int = 0
+    val bodyLength: Int = 0,
 )
 
 @Serializable
