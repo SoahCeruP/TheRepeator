@@ -70,8 +70,12 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.withStyle
@@ -376,7 +380,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                         value = noteContent,
                         onValueChange = { noteContent = it },
                         modifier = Modifier.weight(1f).fillMaxWidth().background(Color(0xFF0F172A), RoundedCornerShape(8.dp)).padding(8.dp),
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         decorationBox = { inner -> if (noteContent.isEmpty()) Text("Type notes here...", color = Color.Gray, fontSize = 14.sp); inner() }
                     )
@@ -744,33 +748,55 @@ private fun ComparerTabWrapper(vm: TheRepeatorViewModel) {
 }
 
 private fun copyToClipboard(context: Context, text: String, scope: CoroutineScope) { 
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val safeText = if (text.length > 5_000_000) {
-        Toast.makeText(context, "Content truncated for clipboard (5MB limit)", Toast.LENGTH_SHORT).show()
-        text.take(5_000_000) + "\n\n[...TRUNCATED DUE TO SIZE...]"
-    } else {
-        text
-    }
-    val clipData = ClipData.newPlainText("TheRepeator HTTP", safeText)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        clipData.description.extras = PersistableBundle().apply {
-            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+    try {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: throw Exception("Clipboard service not available")
+            
+        // Binder transaction limit is ~1MB. We use 200k chars (~400KB) to be safe.
+        val limit = 200_000
+        val safeText = if (text.length > limit) {
+            Toast.makeText(context, "Content truncated for clipboard (200KB limit)", Toast.LENGTH_SHORT).show()
+            text.take(limit) + "\n\n[...TRUNCATED DUE TO SIZE...]"
+        } else {
+            text
         }
-    }
-    clipboard.setPrimaryClip(clipData)
-    
-    // Auto-clear clipboard after 60 seconds for security
-    scope.launch {
-        delay(60.seconds)
-        val currentClip = clipboard.primaryClip
-        if (currentClip != null && currentClip.itemCount > 0 && currentClip.getItemAt(0).text == safeText) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                clipboard.clearPrimaryClip()
-            } else {
-                clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+        
+        val clipData = ClipData.newPlainText("TheRepeator HTTP", safeText)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                clipData.description.extras = PersistableBundle().apply {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
+            } catch (_: Exception) {}
+        }
+        
+        clipboard.setPrimaryClip(clipData)
+        Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+        
+        // Auto-clear clipboard after 60 seconds for security
+        scope.launch(Dispatchers.Main) {
+            delay(60.seconds)
+            try {
+                // Check if our app still has focus/foreground to avoid SecurityException
+                val currentClip = clipboard.primaryClip
+                if (currentClip != null && currentClip.itemCount > 0) {
+                    val item = currentClip.getItemAt(0)
+                    if (item?.text?.toString() == safeText) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            clipboard.clearPrimaryClip()
+                        } else {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+                        }
+                        Toast.makeText(context, "Clipboard cleared for security", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("Clipboard", "Auto-clear failed", e)
             }
-            Toast.makeText(context, "Clipboard cleared for security", Toast.LENGTH_SHORT).show()
         }
+    } catch (e: Exception) {
+        android.util.Log.e("Clipboard", "Copy failed", e)
+        Toast.makeText(context, "Copy failed: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -865,7 +891,7 @@ private fun RepeaterTab(
                                 BasicTextField(
                                     value = newName, 
                                     onValueChange = { newName = it }, 
-                                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 10.sp), 
+                                    textStyle = TextStyle(color = Color.White, fontSize = 10.sp), 
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), 
                                     keyboardActions = KeyboardActions(onDone = { onTabRename(t.id, newName); isEditingName = false }), 
                                     modifier = Modifier.width(60.dp).background(Color(0xFF1E293B), RoundedCornerShape(4.dp)).padding(2.dp)
@@ -911,11 +937,30 @@ private fun RepeaterTab(
             if (tab.isLoading) { IconButton(onClick = { onCancel(tab.id) }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Cancel, null, tint = Color(0xFFEF4444)) } }
         }
         if (isRequestVisible) {
+            if (rawRequestValue.text.length > 100_000) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFACC15).copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                ) {
+                    Row(modifier = Modifier.padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, null, tint = Color(0xFFFACC15), modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Large request (${formatSize(rawRequestValue.text.length)}). Highlight/Selection might crash.",
+                            color = Color(0xFFFACC15),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+            }
             OutlinedTextField(
                 value = rawRequestValue, 
-                onValueChange = onRawRequestChange, 
+                onValueChange = { 
+                    if (it.text.length < 500_000) onRawRequestChange(it) 
+                    else { /* Limit extremely large input to prevent total freeze */ }
+                }, 
                 modifier = Modifier.fillMaxWidth().height(200.dp), 
-                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 11.sp, color = Color.White), 
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.White), 
                 colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF7C3AED), unfocusedBorderColor = Color(0xFF374151)), 
                 placeholder = { Text("Enter raw HTTP request...", color = Color.Gray, fontSize = 11.sp) },
                 shape = RoundedCornerShape(12.dp)
@@ -1016,7 +1061,7 @@ private fun IntruderTab(
             modifier = Modifier.fillMaxWidth().height(120.dp), 
             label = { Text("Request Template (§payload§)") }, 
             colors = darkCard, 
-            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+            textStyle = TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace),
             shape = RoundedCornerShape(12.dp)
         )
 
@@ -1040,11 +1085,11 @@ private fun IntruderTab(
 
         if (state.payloadFileUri != null) {
             Box(modifier = Modifier.fillMaxWidth().height(80.dp).background(Color(0xFF0B1020), RoundedCornerShape(12.dp)).border(1.dp, Color(0xFF374151), RoundedCornerShape(12.dp)).padding(8.dp), contentAlignment = Alignment.Center) {
-                Text("Payload File Loaded\n${state.payloadFileUri.substringAfterLast("/")}", color = Color.White, fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Text("Payload File Loaded\n${state.payloadFileUri.substringAfterLast("/")}", color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center)
             }
         } else if (state.payloads.size > 100) {
             Box(modifier = Modifier.fillMaxWidth().height(80.dp).background(Color(0xFF0B1020), RoundedCornerShape(12.dp)).border(1.dp, Color(0xFF374151), RoundedCornerShape(12.dp)).padding(8.dp)) {
-                Text(state.payloads.take(10).joinToString("\n") + "\n\n... AND ${state.payloads.size - 10} MORE PAYLOADS ...", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                Text(state.payloads.take(10).joinToString("\n") + "\n\n... AND ${state.payloads.size - 10} MORE PAYLOADS ...", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
             }
         } else {
             OutlinedTextField(
@@ -1053,7 +1098,7 @@ private fun IntruderTab(
                 modifier = Modifier.fillMaxWidth().height(80.dp), 
                 placeholder = { Text("One payload per line...") }, 
                 colors = darkCard, 
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                textStyle = TextStyle(fontSize = 11.sp),
                 shape = RoundedCornerShape(12.dp),
                 enabled = !isRunning
             )
@@ -1090,7 +1135,7 @@ private fun IntruderTab(
                     modifier = Modifier.fillMaxWidth().clickable { onSelectResult(res) }.padding(4.dp)
                 ) { 
                     Text(res.resultIndex.toString(), modifier = Modifier.width(40.dp), color = Color.White, fontSize = 10.sp)
-                    Text(res.payload, modifier = Modifier.weight(1f), color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Text(res.payload, modifier = Modifier.weight(1f), color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(res.statusCode.toString(), modifier = Modifier.width(50.dp), color = when(res.statusCode) { in 200..299 -> Color(0xFF22C55E); in 400..499 -> Color(0xFFFB923C); else -> Color(0xFFEF4444) }, fontSize = 10.sp)
                     Text(formatSize(res.length), modifier = Modifier.width(60.dp), color = Color.White, fontSize = 10.sp) 
                     Text("${res.responseTime}ms", modifier = Modifier.width(50.dp), color = Color.Gray, fontSize = 10.sp)
@@ -1514,7 +1559,7 @@ private fun HistoryRow(
                 color = Color.White,
                 fontSize = 11.sp,
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp)
             )
         }
@@ -1791,7 +1836,7 @@ private fun InterceptView(
                     }
                     Column {
                         Text("${selectedReq.method} Intercept", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        if (isExpandedFull) Text(selectedReq.url, color = Color.Gray, fontSize = 10.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        if (isExpandedFull) Text(selectedReq.url, color = Color.Gray, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 Row {
@@ -1824,7 +1869,7 @@ private fun InterceptView(
                             value = editedRequestText,
                             onValueChange = { editedRequestText = it },
                             modifier = Modifier.fillMaxSize(),
-                            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp, color = Color.White),
+                            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.White),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = Color.Transparent,
                                 unfocusedBorderColor = Color.Transparent,
@@ -1896,7 +1941,7 @@ private fun InterceptView(
                         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(req.method, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Spacer(Modifier.width(8.dp))
-                            Text(req.url, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            Text(req.url, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -1947,8 +1992,8 @@ private fun ComparerTab(text1: String, text2: String, onText1Change: (String) ->
         Spacer(Modifier.height(12.dp))
         if (viewMode == 0) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(text1, onText1Change, label = { Text("Response 1") }, modifier = Modifier.weight(1f).fillMaxWidth(), colors = darkCard, textStyle = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 11.sp))
-                OutlinedTextField(text2, onText2Change, label = { Text("Response 2") }, modifier = Modifier.weight(1f).fillMaxWidth(), colors = darkCard, textStyle = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 11.sp))
+                OutlinedTextField(text1, onText1Change, label = { Text("Response 1") }, modifier = Modifier.weight(1f).fillMaxWidth(), colors = darkCard, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp))
+                OutlinedTextField(text2, onText2Change, label = { Text("Response 2") }, modifier = Modifier.weight(1f).fillMaxWidth(), colors = darkCard, textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp))
             }
         } else {
             val lines1 = text1.lines()
@@ -1965,10 +2010,10 @@ private fun ComparerTab(text1: String, text2: String, onText1Change: (String) ->
                         Text((i + 1).toString(), color = Color(0xFF4B5563), fontSize = 10.sp, modifier = Modifier.width(30.dp).padding(start = 4.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             if (line1.isNotEmpty() || i < lines1.size) {
-                                Text(line1, color = if (isDifferent) Color(0xFFEF4444) else Color(0xFF94A3B8), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                Text(line1, color = if (isDifferent) Color(0xFFEF4444) else Color(0xFF94A3B8), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                             }
                             if (isDifferent && (line2.isNotEmpty() || i < lines2.size)) {
-                                Text(line2, color = Color(0xFF22C55E), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                Text(line2, color = Color(0xFF22C55E), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                             }
                         }
                     }
@@ -1984,11 +2029,11 @@ private fun WebSocketTab(messages: List<WebSocketMessage>, state: String, onConn
     var url by remember { mutableStateOf("wss://echo.websocket.org") }; var msg by remember { mutableStateOf("") }; var autoReconnect by remember { mutableStateOf(false) }; var searchQuery by remember { mutableStateOf("") }
     Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("WebSocket", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp); val stateColor = when (state) { "CONNECTED" -> Color(0xFF22C55E); "CONNECTING" -> Color(0xFFFACC15); "ERROR" -> Color(0xFFEF4444); else -> Color(0xFF94A3B8) }; AssistChip(onClick = {}, label = { Text(state, fontSize = 10.sp) }, colors = AssistChipDefaults.assistChipColors(labelColor = stateColor, containerColor = Color(0xFF1E293B))) }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(url, { url = it }, modifier = Modifier.weight(1f), label = { Text("WS URL") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)); Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("Auto", color = Color.White, fontSize = 10.sp); Checkbox(autoReconnect, { autoReconnect = it }, modifier = Modifier.size(24.dp), colors = CheckboxDefaults.colors(checkedColor = Color(0xFF7C3AED))) } }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedTextField(url, { url = it }, modifier = Modifier.weight(1f), label = { Text("WS URL") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = TextStyle(fontSize = 12.sp)); Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("Auto", color = Color.White, fontSize = 10.sp); Checkbox(autoReconnect, { autoReconnect = it }, modifier = Modifier.size(24.dp), colors = CheckboxDefaults.colors(checkedColor = Color(0xFF7C3AED))) } }
         Button(onClick = { onConnect(url, autoReconnect) }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) { Text("Connect", fontSize = 12.sp) }
         CustomTextField(searchQuery, { searchQuery = it; onSearch(it) }, "Filter messages...", Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(16.dp)) })
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) { items(messages) { m -> val color = if (m.direction == MessageDirection.SENT) Color(0xFF7C3AED) else Color(0xFF22C55E); Card(colors = CardDefaults.cardColors(Color(0xFF111827)), modifier = Modifier.fillMaxWidth()) { Column(modifier = Modifier.padding(8.dp)) { Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(if (m.direction == MessageDirection.SENT) "SENT" else "RECEIVED", color = color, fontWeight = FontWeight.Bold, fontSize = 10.sp); Text(java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(m.timestamp), color = Color(0xFF4B5563), fontSize = 10.sp) }; Text(m.content, color = Color.White, fontSize = 12.sp); if (m.binaryData != null) { Text("Binary (HEX): ${m.binaryData}", color = Color(0xFFFACC15), fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace) } } } } }
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(msg, { msg = it }, modifier = Modifier.weight(1f), label = { Text("Message (0x for HEX)") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)); IconButton(onClick = { onSend(msg); msg = "" }) { Icon(Icons.AutoMirrored.Filled.Send, null, tint = Color(0xFF7C3AED)) } }
+        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) { items(messages) { m -> val color = if (m.direction == MessageDirection.SENT) Color(0xFF7C3AED) else Color(0xFF22C55E); Card(colors = CardDefaults.cardColors(Color(0xFF111827)), modifier = Modifier.fillMaxWidth()) { Column(modifier = Modifier.padding(8.dp)) { Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(if (m.direction == MessageDirection.SENT) "SENT" else "RECEIVED", color = color, fontWeight = FontWeight.Bold, fontSize = 10.sp); Text(java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(m.timestamp), color = Color(0xFF4B5563), fontSize = 10.sp) }; Text(m.content, color = Color.White, fontSize = 12.sp); if (m.binaryData != null) { Text("Binary (HEX): ${m.binaryData}", color = Color(0xFFFACC15), fontSize = 10.sp, fontFamily = FontFamily.Monospace) } } } } }
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(msg, { msg = it }, modifier = Modifier.weight(1f), label = { Text("Message (0x for HEX)") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = TextStyle(fontSize = 12.sp)); IconButton(onClick = { onSend(msg); msg = "" }) { Icon(Icons.AutoMirrored.Filled.Send, null, tint = Color(0xFF7C3AED)) } }
     }
 }
 
@@ -1997,11 +2042,22 @@ private fun WebSocketTab(messages: List<WebSocketMessage>, state: String, onConn
 private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, onInputChange: (String) -> Unit, onAddStep: (DecoderTransformType) -> Unit, onRemoveStep: (String) -> Unit, onClear: () -> Unit, onSwap: () -> Unit, onCopy: (String) -> Unit, onMoveStep: (String, Boolean) -> Unit, onEncodeJwt: (String, String) -> Unit) {
     var showAddMenu by remember { mutableStateOf(false) }
     var showJwtEditor by remember { mutableStateOf(false) }
-    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val context = LocalContext.current
+    val clipboard = remember { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
     
     Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("Decoder / Encoder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp); Row { IconButton(onClick = { val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""; onInputChange(clip) }) { Icon(Icons.Default.ContentPaste, "Paste", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = { onCopy(output) }) { Icon(Icons.Default.ContentCopy, "Copy", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = onClear) { Icon(Icons.Default.Clear, "Clear", tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp)) } } }
-        OutlinedTextField(input, onInputChange, modifier = Modifier.fillMaxWidth().height(120.dp), label = { Text("Input") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text("Decoder / Encoder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp); Row { IconButton(onClick = { 
+            try {
+                val clip = clipboard.primaryClip
+                if (clip != null && clip.itemCount > 0) {
+                    val text = clip.getItemAt(0).text?.toString() ?: ""
+                    onInputChange(text)
+                }
+            } catch (_: Exception) {
+                Toast.makeText(context, "Paste failed", Toast.LENGTH_SHORT).show()
+            }
+        }) { Icon(Icons.Default.ContentPaste, "Paste", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = { onCopy(output) }) { Icon(Icons.Default.ContentCopy, "Copy", tint = Color(0xFF94A3B8), modifier = Modifier.size(20.dp)) }; IconButton(onClick = onClear) { Icon(Icons.Default.Clear, "Clear", tint = Color(0xFFEF4444), modifier = Modifier.size(20.dp)) } } }
+        OutlinedTextField(input, onInputChange, modifier = Modifier.fillMaxWidth().height(120.dp), label = { Text("Input") }, colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White), textStyle = TextStyle(fontSize = 12.sp))
         Text("Transform Chain", color = Color(0xFF7C3AED), fontWeight = FontWeight.Bold, fontSize = 12.sp)
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) { 
             steps.forEachIndexed { index, step -> 
@@ -2038,10 +2094,14 @@ private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, 
                             Text("Payload", color = Color(0xFF94A3B8), fontSize = 10.sp)
                             Text(parts[1], color = Color(0xFFFACC15), fontSize = 12.sp)
                         } else {
-                            Text(output, color = Color(0xFF22C55E), fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp) 
+                            Text(output, color = Color(0xFF22C55E), fontFamily = FontFamily.Monospace, fontSize = 12.sp) 
                         }
                     } else { 
-                        Text(output.ifEmpty { "Output..." }, color = if (output.isEmpty()) Color(0xFF4B5563) else if (output.startsWith("Error:")) Color(0xFFEF4444) else Color(0xFF22C55E), fontSize = 12.sp) 
+                        if (output.length > 100_000) {
+                            Text(output.take(100_000) + "\n\n[... TRUNCATED FOR STABILITY ...]", color = Color(0xFF22C55E), fontSize = 12.sp)
+                        } else {
+                            Text(output.ifEmpty { "Output..." }, color = if (output.isEmpty()) Color(0xFF4B5563) else if (output.startsWith("Error:")) Color(0xFFEF4444) else Color(0xFF22C55E), fontSize = 12.sp) 
+                        }
                     } 
                 } 
             } 
@@ -2060,9 +2120,9 @@ private fun DecoderTab(input: String, output: String, steps: List<DecoderStep>, 
             text = {
                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Header (JSON)", color = Color(0xFF94A3B8), fontSize = 10.sp)
-                    OutlinedTextField(hText, { hText = it }, modifier = Modifier.fillMaxWidth().height(100.dp), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
+                    OutlinedTextField(hText, { hText = it }, modifier = Modifier.fillMaxWidth().height(100.dp), textStyle = TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
                     Text("Payload (JSON)", color = Color(0xFF94A3B8), fontSize = 10.sp)
-                    OutlinedTextField(pText, { pText = it }, modifier = Modifier.fillMaxWidth().height(150.dp), textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
+                    OutlinedTextField(pText, { pText = it }, modifier = Modifier.fillMaxWidth().height(150.dp), textStyle = TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White))
                 }
             },
             confirmButton = {
@@ -2195,11 +2255,13 @@ private fun RenderLargeText(
     showCopyFull: Boolean = true
 ) {
     // High-performance "Lite" viewer for potentially massive text
-    val displayLimit = if (isExpanded) 100_000_000 else 550_000
+    // SelectionContainer can crash if text is too large for Binder (>1MB).
+    // We limit display to ~400KB (200k chars) to prevent system copy crashes.
+    val displayLimit = if (isExpanded) 200_000 else 100_000
     val totalChars = minOf(text.length, displayLimit)
     val isActuallyTruncated = text.length > displayLimit
     
-    val chunkSize = 1000 // Smaller chunks for much better search scroll accuracy
+    val chunkSize = 5000 // Larger chunks to allow selecting full tokens like big JWTs
     val numChunks = (totalChars + chunkSize - 1) / chunkSize
     
     // Memory-safe search: we index matches without copying the whole string
@@ -2274,9 +2336,9 @@ private fun RenderLargeText(
                                 s = matchIdx + searchQuery.length
                             }
                         }
-                        Text(annotatedString, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
+                        Text(annotatedString, color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     } else {
-                        Text(if (useSyntaxHighlighting) highlightSyntax(chunk) else AnnotatedString(chunk), color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
+                        Text(if (useSyntaxHighlighting) highlightSyntax(chunk) else AnnotatedString(chunk), color = Color(0xFFE2E8F0), fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp))
                     }
                 }
                 
@@ -2286,7 +2348,7 @@ private fun RenderLargeText(
                             "\n[... CONTENT TRUNCATED ...]\n",
                             color = Color(0xFF94A3B8),
                             modifier = Modifier.padding(8.dp).fillMaxWidth(),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
@@ -2340,7 +2402,7 @@ private fun HistoryDetailView(
                     }
                     Column {
                         Text("${summary.method} Detail", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        Text(summary.url, color = Color(0xFF7C3AED), fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        Text(summary.url, color = Color(0xFF7C3AED), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 Row {
@@ -2781,8 +2843,8 @@ private fun CustomTextField(
             .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
             .onFocusChanged { onFocusChanged(it.isFocused) },
         singleLine = true, 
-        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp), 
-        cursorBrush = androidx.compose.ui.graphics.SolidColor(Color(0xFF7C3AED)), 
+        textStyle = TextStyle(color = Color.White, fontSize = 12.sp), 
+        cursorBrush = SolidColor(Color(0xFF7C3AED)), 
         keyboardOptions = keyboardOptions, 
         keyboardActions = keyboardActions, 
         decorationBox = { itf -> 
