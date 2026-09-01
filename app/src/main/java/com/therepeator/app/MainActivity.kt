@@ -62,6 +62,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalFocusManager
@@ -130,6 +131,8 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     var showSettings by remember { mutableStateOf(value = false) }
     var showBrowserHistory by remember { mutableStateOf(false) }
     var showInterceptSettings by remember { mutableStateOf(false) }
+    var showNoteDialog by remember { mutableStateOf(false) }
+    var noteContent by remember { mutableStateOf("") }
     var sendToDecoderText by remember { mutableStateOf<String?>(null) }
     var loadProgress by remember { mutableIntStateOf(0) }
 
@@ -303,6 +306,17 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     ) {
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            floatingActionButton = {
+                if (selectedTab != 5 && (selectedTab != 4 || selectedHistoryRequest == null)) {
+                    FloatingActionButton(
+                        onClick = { showNoteDialog = true },
+                        containerColor = Color(0xFF7C3AED),
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    ) {
+                        Icon(Icons.Default.NoteAlt, "Notes", tint = Color.White)
+                    }
+                }
+            },
             topBar = { 
                 if (selectedTab != 5 && (selectedTab != 4 || selectedHistoryRequest == null)) {
                     TopHeaderBar(
@@ -332,6 +346,44 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                     4 -> HistoryTabWrapper(vm, context)
                     5 -> BrowserTabWrapper(vm, browserWebView, loadProgress, { showBrowserHistory = true }, { showInterceptSettings = true })
                     6 -> ComparerTabWrapper(vm)
+                }
+            }
+        }
+    }
+
+    if (showNoteDialog) {
+        Dialog(onDismissRequest = { showNoteDialog = false }) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().height(400.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                        Text("Session Notes", color = Color.White, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { noteContent = "" }, modifier = Modifier.size(24.dp)) { 
+                                Icon(Icons.Default.DeleteSweep, "Clear", tint = Color.Gray, modifier = Modifier.size(20.dp)) 
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            IconButton(onClick = { showNoteDialog = false }, modifier = Modifier.size(24.dp)) { 
+                                Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(20.dp)) 
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    BasicTextField(
+                        value = noteContent,
+                        onValueChange = { noteContent = it },
+                        modifier = Modifier.weight(1f).fillMaxWidth().background(Color(0xFF0F172A), RoundedCornerShape(8.dp)).padding(8.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        decorationBox = { inner -> if (noteContent.isEmpty()) Text("Type notes here...", color = Color.Gray, fontSize = 14.sp); inner() }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = { showNoteDialog = false }, modifier = Modifier.align(Alignment.End), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))) {
+                        Text("Save")
+                    }
                 }
             }
         }
@@ -772,6 +824,8 @@ private fun RepeaterTab(
 ) {
     val tab = tabs.getOrNull(selectedTabIndex) ?: return
     var isRequestVisible by remember { mutableStateOf(true) }
+    var showCloseIcons by remember { mutableStateOf(false) }
+    
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         ScrollableTabRow(selectedTabIndex = selectedTabIndex, edgePadding = 0.dp, containerColor = Color.Transparent, contentColor = Color(0xFF7C3AED), divider = {}) {
             tabs.forEachIndexed { index, t ->
@@ -783,14 +837,15 @@ private fun RepeaterTab(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.pointerInput(t.id) {
                                 detectTapGestures(
-                                    onDoubleTap = { /* handled by inner double tap */ }
+                                    onTap = { onTabSelected(index) },
+                                    onDoubleTap = { showCloseIcons = !showCloseIcons }
                                 )
                             }
                         ) {
                             var isEditingName by remember { mutableStateOf(false) }
                             var newName by remember { mutableStateOf(t.name) }
                             
-                            if (!t.isPinned) {
+                            if (!t.isPinned && showCloseIcons) {
                                 Box(
                                     modifier = Modifier
                                         .size(24.dp)
@@ -822,7 +877,7 @@ private fun RepeaterTab(
                                     modifier = Modifier.pointerInput(t.id) {
                                         detectTapGestures(
                                             onTap = { onTabSelected(index) },
-                                            onDoubleTap = { isEditingName = true }
+                                            onLongPress = { isEditingName = true } // Changed rename to long press to free double tap
                                         )
                                     }
                                 )
@@ -2144,7 +2199,7 @@ private fun RenderLargeText(
     val totalChars = minOf(text.length, displayLimit)
     val isActuallyTruncated = text.length > displayLimit
     
-    val chunkSize = 20_000
+    val chunkSize = 1000 // Smaller chunks for much better search scroll accuracy
     val numChunks = (totalChars + chunkSize - 1) / chunkSize
     
     // Memory-safe search: we index matches without copying the whole string

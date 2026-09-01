@@ -405,7 +405,7 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun createUnsafeSslSocketFactory(trustManager: X509TrustManager): javax.net.ssl.SSLSocketFactory {
         val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(trustManager)
-        val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
         sslContext.init(null, trustAllCerts, java.security.SecureRandom())
         return sslContext.socketFactory
     }
@@ -541,8 +541,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                         val jsonElement = jsonPretty.parseToJsonElement(possibleJson)
                         tb.substring(0, startIdx) + "\n" + jsonPretty.encodeToString(jsonElement)
                     } catch (_: Exception) {
-                        if (tb.startsWith("<")) prettifyXmlHtml(tb) else body
+                        if (tb.startsWith("<") || tb.contains("<!DOCTYPE", ignoreCase = true) || tb.contains("<html", ignoreCase = true)) prettifyXmlHtml(tb) else body
                     }
+                } else if (tb.startsWith("<") || tb.contains("<!DOCTYPE", ignoreCase = true) || tb.contains("<html", ignoreCase = true)) {
+                    prettifyXmlHtml(tb)
                 } else body
             }
         } catch (_: Exception) { body }
@@ -588,6 +590,16 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setIntruderPayloadFile(uri: String) {
         _intruderState.update { it.copy(payloadFileUri = uri, payloads = emptyList()) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val count = getApplication<Application>().contentResolver.openInputStream(uri.toUri())?.use { stream ->
+                    stream.bufferedReader().lineSequence().count()
+                } ?: 0
+                _intruderState.update { it.copy(stats = it.stats.copy(totalPayloads = count)) }
+            } catch (e: Exception) {
+                android.util.Log.e("Intruder", "Error counting payloads", e)
+            }
+        }
     }
 
     fun setInterceptionMode(mode: InterceptMode) {
@@ -691,9 +703,10 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
 
-                // Estimate total
+                // Use accurate count from stats if available
                 val totalEstimate = if (_intruderState.value.payloadFileUri != null) {
-                    _intruderState.value.stats.totalPayloads.takeIf { it > 0 } ?: 1000000 
+                    val statsTotal = _intruderState.value.stats.totalPayloads
+                    if (statsTotal > 0) statsTotal else 1000000
                 } else {
                     _intruderState.value.payloads.size
                 }
@@ -1393,9 +1406,8 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
         val headers = try { Json.decodeFromString<Map<String, String>>(headersJson) } catch (_: Exception) { emptyMap() }
         val sb = StringBuilder(); sb.append("${req.method} ${req.path.ifEmpty { "/" }} ${req.protocol}\n")
         
-        // Use a virtual protocol prefix in the Host header so parseRawRequest knows the original scheme
-        val hostPrefix = if (req.url.startsWith("http://")) "http://" else ""
-        sb.append("Host: $hostPrefix${req.host}\n")
+        // Removed the http:// prefix hack to make it "normal" HTTP
+        sb.append("Host: ${req.host}\n")
         
         headers.forEach { (k, v) -> if (k.lowercase() != "host") sb.append("$k: $v\n") }
         sb.append("\n")
@@ -1558,9 +1570,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 var scheme = if (hostHeader.startsWith("http://")) "http" else if (hostHeader.startsWith("https://")) "https" else null
                 val cleanHost = if (scheme != null) hostHeader.substring(scheme.length + 3) else hostHeader
                 
-                // Fallback to port detection or default to https
+                // Fallback to port detection or default to http (to avoid SSL errors on plain sites)
                 if (scheme == null) {
-                    scheme = if (cleanHost.contains(":80") || finalUrl.contains(":80")) "http" else "https"
+                    scheme = if (cleanHost.contains(":443") || finalUrl.contains(":443")) "https" else "http"
                 }
 
                 // Check if rawUrl already contains the host (e.g. "google.com/")
