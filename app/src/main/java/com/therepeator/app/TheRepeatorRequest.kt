@@ -214,6 +214,18 @@ data class ScopeRule(
     val enabled: Boolean = true
 )
 
+@Serializable
+data class ProjectData(
+    val version: Int = 2,
+    val repeaterTabs: List<RepeaterTabState>,
+    val historyRequests: List<TheRepeatorRequest>,
+    val browserHistory: List<BrowserHistoryItem>,
+    val scopeRules: List<ScopeRule>,
+    val variables: List<Variable>,
+    val matchReplaceRules: List<MatchReplaceRule>,
+    val intruderState: IntruderState? = null
+)
+
 enum class ScopeRuleType {
     HOST, PATH, KEYWORD
 }

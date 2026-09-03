@@ -172,9 +172,16 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     init {
         viewModelScope.launch {
-            // Cleanup session data on startup
+            // Cleanup session data on startup (Temp Project)
             repository.clearHistory()
             repository.clearAllIntruderResults()
+            repository.clearBrowserHistory()
+            repository.clearRulesAndVariables()
+            _intruderState.value = IntruderState()
+            _repeaterTabs.value = listOf(
+                RepeaterTabState(id = UUID.randomUUID().toString(), name = "1", rawRequest = "GET / HTTP/1.1\nHost: google.com\nConnection: close\n\n"),
+            )
+            _selectedTabIndex.value = 0
         }
         viewModelScope.launch {
             for (request in interceptionChannel) {
@@ -1570,9 +1577,9 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 var scheme = if (hostHeader.startsWith("http://")) "http" else if (hostHeader.startsWith("https://")) "https" else null
                 val cleanHost = if (scheme != null) hostHeader.substring(scheme.length + 3) else hostHeader
                 
-                // Fallback to port detection or default to http (to avoid SSL errors on plain sites)
+                // Fallback to port detection or default to https as requested by user
                 if (scheme == null) {
-                    scheme = if (cleanHost.contains(":443") || finalUrl.contains(":443")) "https" else "http"
+                    scheme = if (cleanHost.contains(":80") || finalUrl.contains(":80")) "http" else "https"
                 }
 
                 // Check if rawUrl already contains the host (e.g. "google.com/")
@@ -1688,6 +1695,40 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
 
     fun addBrowserHistory(url: String, title: String) {
         viewModelScope.launch { repository.addBrowserHistory(BrowserHistoryItem(url = url, title = title)) }
+    }
+
+    suspend fun exportProject(): ProjectData {
+        return ProjectData(
+            repeaterTabs = _repeaterTabs.value,
+            historyRequests = repository.getAllRequests(),
+            browserHistory = repository.getAllBrowserHistory(),
+            scopeRules = repository.scopeRules.value,
+            variables = repository.variables.value,
+            matchReplaceRules = repository.matchReplaceRules.value,
+            intruderState = _intruderState.value
+        )
+    }
+
+    suspend fun importProject(data: ProjectData) {
+        // Clear current state first
+        repository.clearHistory()
+        repository.clearAllIntruderResults()
+        repository.clearBrowserHistory()
+        repository.clearRulesAndVariables()
+
+        // Restore state
+        repository.insertRequests(data.historyRequests)
+        repository.insertBrowserHistory(data.browserHistory)
+        repository.setScopeRules(data.scopeRules)
+        repository.setVariables(data.variables)
+        repository.setMatchReplaceRules(data.matchReplaceRules)
+        
+        _intruderState.value = data.intruderState?.copy(status = IntruderStatus.IDLE) ?: IntruderState()
+        
+        _repeaterTabs.value = if (data.repeaterTabs.isNotEmpty()) data.repeaterTabs else listOf(
+            RepeaterTabState(id = UUID.randomUUID().toString(), name = "1", rawRequest = "GET / HTTP/1.1\nHost: google.com\nConnection: close\n\n"),
+        )
+        _selectedTabIndex.value = 0
     }
 
     fun updateTabLoading(id: String, loading: Boolean) { 

@@ -27,10 +27,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -59,7 +62,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -84,6 +86,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
+import java.util.zip.GZIPOutputStream
+import java.util.zip.GZIPInputStream
 import java.net.URL
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
@@ -132,7 +138,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var showSettings by remember { mutableStateOf(value = false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showBrowserHistory by remember { mutableStateOf(false) }
     var showInterceptSettings by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
@@ -140,6 +146,63 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
     var sendToDecoderText by remember { mutableStateOf<String?>(null) }
     var loadProgress by remember { mutableIntStateOf(0) }
 
+    val projectJson = remember { Json { encodeDefaults = false; ignoreUnknownKeys = true } }
+
+    val saveProjectLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        uri?.let {
+            scope.launch {
+                try {
+                    val projectData = vm.exportProject()
+                    val json = projectJson.encodeToString(projectData)
+                    context.contentResolver.openOutputStream(it)?.let { os ->
+                        GZIPOutputStream(os).use { gzip ->
+                            gzip.write(json.toByteArray(Charsets.UTF_8))
+                        }
+                    }
+                    Toast.makeText(context, "Project Saved (Compressed)", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Save Failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val importProjectLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            scope.launch {
+                try {
+                    val json = context.contentResolver.openInputStream(it)?.let { isStream ->
+                        GZIPInputStream(isStream).bufferedReader().use { reader -> reader.readText() }
+                    } ?: ""
+                    val projectData = projectJson.decodeFromString<ProjectData>(json)
+                    vm.importProject(projectData)
+                    Toast.makeText(context, "Project Imported", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    // Fallback to plain JSON if GZIP fails (for backward compatibility with the previous version)
+                    try {
+                        val plainJson = context.contentResolver.openInputStream(it)?.bufferedReader()?.use { reader -> reader.readText() } ?: ""
+                        val projectData = projectJson.decodeFromString<ProjectData>(plainJson)
+                        vm.importProject(projectData)
+                        Toast.makeText(context, "Project Imported (Plain JSON)", Toast.LENGTH_SHORT).show()
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Import Failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    val onSaveProject = {
+        val hasScope = vm.scopeRules.value.any { it.enabled }
+        val hasHistory = vm.history.value.isNotEmpty()
+        if (!hasScope) {
+            Toast.makeText(context, "No active scope. Define a scope in settings first.", Toast.LENGTH_LONG).show()
+        } else if (!hasHistory) {
+            Toast.makeText(context, "No requests in history to save.", Toast.LENGTH_LONG).show()
+        } else {
+            saveProjectLauncher.launch("RepeatorProject_${System.currentTimeMillis()}.rp")
+        }
+    }
 
     // BackHandler moved to specific tabs to avoid global recomposition
 
@@ -158,7 +221,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 builtInZoomControls = true
                 displayZoomControls = false
                 
-                // Enhanced for broad site compatibility (fixes menus, etc)
+                // Enhanced for broad site compatibility (fixes menus, etc.)
                 allowFileAccess = true
                 allowContentAccess = true
                 setSupportMultipleWindows(true)
@@ -325,7 +388,9 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                 if (selectedTab != 5 && (selectedTab != 4 || selectedHistoryRequest == null)) {
                     TopHeaderBar(
                         onMenuClick = { scope.launch { drawerState.open() } }, 
-                        onSettings = { showSettings = true }
+                        onSettings = { showSettings = true },
+                        onSaveProject = onSaveProject,
+                        onImportProject = { importProjectLauncher.launch(arrayOf("*/*")) }
                     ) 
                 }
             },
@@ -801,7 +866,8 @@ private fun copyToClipboard(context: Context, text: String, scope: CoroutineScop
 }
 
 @Composable
-private fun TopHeaderBar(onMenuClick: () -> Unit, onSettings: () -> Unit) {
+private fun TopHeaderBar(onMenuClick: () -> Unit, onSettings: () -> Unit, onSaveProject: () -> Unit, onImportProject: () -> Unit) {
+    var showProjectMenu by remember { mutableStateOf(false) }
     val brush = androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color(0xFF0F172A), Color(0xFF020617)))
     Column(modifier = Modifier.fillMaxWidth().background(brush).statusBarsPadding()) {
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -818,17 +884,52 @@ private fun TopHeaderBar(onMenuClick: () -> Unit, onSettings: () -> Unit) {
                     Text("TheRepeator", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
                 } 
             }
-            IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) { 
-                Icon(
-                    Icons.Default.Settings, "Settings", 
-                    tint = Color(0xFF94A3B8), 
-                    modifier = Modifier.size(22.dp)
-                ) 
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    IconButton(onClick = { showProjectMenu = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.Folder, "Project",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showProjectMenu,
+                        onDismissRequest = { showProjectMenu = false },
+                        modifier = Modifier.background(Color(0xFF1E293B))
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Save Project", color = Color.White) },
+                            onClick = {
+                                showProjectMenu = false
+                                onSaveProject()
+                            },
+                            leadingIcon = { Icon(Icons.Default.Save, null, tint = Color(0xFF22C55E)) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Import Project", color = Color.White) },
+                            onClick = {
+                                showProjectMenu = false
+                                onImportProject()
+                            },
+                            leadingIcon = { Icon(Icons.Default.UploadFile, null, tint = Color(0xFF3B82F6)) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) { 
+                    Icon(
+                        Icons.Default.Settings, "Settings", 
+                        tint = Color(0xFF94A3B8), 
+                        modifier = Modifier.size(22.dp)
+                    ) 
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RepeaterTab(
     tabs: List<RepeaterTabState>,
@@ -850,75 +951,122 @@ private fun RepeaterTab(
 ) {
     val tab = tabs.getOrNull(selectedTabIndex) ?: return
     var isRequestVisible by remember { mutableStateOf(true) }
-    var showCloseIcons by remember { mutableStateOf(false) }
+    
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var tabToRename by remember { mutableStateOf<RepeaterTabState?>(null) }
+    var newTabName by remember { mutableStateOf("") }
     
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-        ScrollableTabRow(selectedTabIndex = selectedTabIndex, edgePadding = 0.dp, containerColor = Color.Transparent, contentColor = Color(0xFF7C3AED), divider = {}) {
+        ScrollableTabRow(
+            selectedTabIndex = selectedTabIndex, 
+            edgePadding = 0.dp, 
+            containerColor = Color.Transparent, 
+            contentColor = Color(0xFF7C3AED), 
+            divider = {},
+            indicator = {} 
+        ) {
             tabs.forEachIndexed { index, t ->
-                Tab(
-                    selected = selectedTabIndex == index, 
-                    onClick = { onTabSelected(index) }, 
-                    text = { 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.pointerInput(t.id) {
-                                detectTapGestures(
-                                    onTap = { onTabSelected(index) },
-                                    onDoubleTap = { showCloseIcons = !showCloseIcons }
-                                )
+                val interactionSource = remember { MutableInteractionSource() }
+                val isSelected = selectedTabIndex == index
+                
+                Box(
+                    modifier = Modifier
+                        .height(48.dp)
+                        .widthIn(min = 90.dp)
+                        .combinedClickable(
+                            interactionSource = interactionSource,
+                            indication = LocalIndication.current,
+                            onClick = { onTabSelected(index) },
+                            onLongClick = { 
+                                tabToRename = t
+                                newTabName = t.name
+                                showRenameDialog = true 
                             }
-                        ) {
-                            var isEditingName by remember { mutableStateOf(false) }
-                            var newName by remember { mutableStateOf(t.name) }
-                            
-                            if (!t.isPinned && showCloseIcons) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .pointerInput(t.id) {
-                                            detectTapGestures(
-                                                onTap = { onTabClose(t.id) }
-                                            )
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) { 
-                                    Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(14.dp)) 
-                                }
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            
-                            if (isEditingName) {
-                                BasicTextField(
-                                    value = newName, 
-                                    onValueChange = { newName = it }, 
-                                    textStyle = TextStyle(color = Color.White, fontSize = 10.sp), 
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), 
-                                    keyboardActions = KeyboardActions(onDone = { onTabRename(t.id, newName); isEditingName = false }), 
-                                    modifier = Modifier.width(60.dp).background(Color(0xFF1E293B), RoundedCornerShape(4.dp)).padding(2.dp)
-                                )
-                            } else {
-                                Text(
-                                    t.name, 
-                                    fontSize = 10.sp, 
-                                    modifier = Modifier.pointerInput(t.id) {
-                                        detectTapGestures(
-                                            onTap = { onTabSelected(index) },
-                                            onLongPress = { isEditingName = true } // Changed rename to long press to free double tap
-                                        )
-                                    }
-                                )
-                            }
-                            
-                            if (t.isPinned) {
-                                Spacer(Modifier.width(4.dp))
-                                Icon(Icons.Default.PushPin, null, tint = Color(0xFF7C3AED), modifier = Modifier.size(10.dp))
+                        )
+                ) {
+                    // Selection Indicator
+                    if (isSelected) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp)
+                                .background(Color(0xFF7C3AED))
+                                .align(Alignment.BottomCenter)
+                        )
+                    }
+
+                    Box(modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+                        // Close icon left
+                        if (!t.isPinned) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterStart)
+                                    .size(28.dp)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { onTabClose(t.id) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Close, null, tint = Color.Gray, modifier = Modifier.size(12.dp))
                             }
                         }
+                        
+                        // Tab Name
+                        Text(
+                            text = t.name,
+                            modifier = Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
+                            fontSize = 11.sp,
+                            color = if (isSelected) Color(0xFF7C3AED) else Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                        
+                        // Pin icon right
+                        if (t.isPinned) {
+                            Icon(
+                                Icons.Default.PushPin, null, tint = Color(0xFF7C3AED),
+                                modifier = Modifier.align(Alignment.CenterEnd).size(12.dp).padding(end = 4.dp)
+                            )
+                        }
                     }
-                )
+                }
             }
             IconButton(onClick = onAddTab) { Icon(Icons.Default.Add, null, tint = Color(0xFF7C3AED)) }
         }
+        
+        if (showRenameDialog && tabToRename != null) {
+            AlertDialog(
+                onDismissRequest = { showRenameDialog = false },
+                containerColor = Color(0xFF1E293B),
+                title = { Text("Rename Tab", color = Color.White, fontSize = 16.sp) },
+                text = {
+                    OutlinedTextField(
+                        value = newTabName,
+                        onValueChange = { newTabName = it },
+                        textStyle = TextStyle(color = Color.White),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF7C3AED), unfocusedBorderColor = Color.Gray)
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { 
+                        onTabRename(tabToRename!!.id, newTabName)
+                        showRenameDialog = false 
+                    }) {
+                        Text("Rename", color = Color(0xFF7C3AED))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRenameDialog = false }) {
+                        Text("Cancel", color = Color.Gray)
+                    }
+                }
+            )
+        }
+        
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onSend, enabled = !tab.isLoading, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED)), modifier = Modifier.weight(1f).height(36.dp)) { 
                 if (tab.isLoading) CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
@@ -972,7 +1120,7 @@ private fun RepeaterTab(
             onExtract = {}, 
             onPrettifyBody = onPrettifyBody,
             metadata = tab.metadata,
-            statusCode = if (tab.response.startsWith("HTTP")) tab.response.split(" ").getOrNull(1)?.toIntOrNull() else null,
+            statusCode = if (tab.response.startsWith("  t")) tab.response.split(" ").getOrNull(1)?.toIntOrNull() else null,
             showExtract = false,
             modifier = Modifier.weight(1f),
             showCopyFull = false

@@ -27,6 +27,10 @@ class TheRepeatorRepository(
         sharedMatchReplaceRules.value = sharedMatchReplaceRules.value + rule
     }
 
+    fun setMatchReplaceRules(rules: List<MatchReplaceRule>) {
+        sharedMatchReplaceRules.value = rules
+    }
+
     fun removeMatchReplaceRule(id: String) {
         sharedMatchReplaceRules.value = sharedMatchReplaceRules.value.filter { it.id != id }
     }
@@ -41,12 +45,20 @@ class TheRepeatorRepository(
         sharedVariables.value = sharedVariables.value + variable
     }
 
+    fun setVariables(variables: List<Variable>) {
+        sharedVariables.value = variables
+    }
+
     fun removeVariable(id: String) {
         sharedVariables.value = sharedVariables.value.filter { it.id != id }
     }
 
     fun addScopeRule(rule: ScopeRule) {
         sharedScopeRules.value = sharedScopeRules.value + rule
+    }
+
+    fun setScopeRules(rules: List<ScopeRule>) {
+        sharedScopeRules.value = rules
     }
 
     fun removeScopeRule(id: String) {
@@ -59,8 +71,24 @@ class TheRepeatorRepository(
         }
     }
 
+    fun clearRulesAndVariables() {
+        sharedMatchReplaceRules.value = emptyList()
+        sharedVariables.value = emptyList()
+        sharedScopeRules.value = emptyList()
+    }
+
     suspend fun addRequest(request: TheRepeatorRequest): Long {
         return dao.insertRequest(request)
+    }
+
+    suspend fun getAllRequests(): List<TheRepeatorRequest> = dao.getAllRequests()
+
+    suspend fun insertRequests(requests: List<TheRepeatorRequest>) = dao.insertRequests(requests)
+
+    suspend fun getAllBrowserHistory(): List<BrowserHistoryItem> = browserDao.getAllHistorySync()
+
+    suspend fun insertBrowserHistory(items: List<BrowserHistoryItem>) {
+        items.forEach { browserDao.insert(it) }
     }
 
     suspend fun clearHistory() {

@@ -20,6 +20,12 @@ interface TheRepeatorRequestDao {
     @Query("DELETE FROM requests WHERE id IN (:ids)")
     suspend fun deleteRequests(ids: List<Int>)
 
+    @Query("SELECT * FROM requests")
+    suspend fun getAllRequests(): List<TheRepeatorRequest>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRequests(requests: List<TheRepeatorRequest>)
+
     @Query("SELECT * FROM requests WHERE id = :id")
     suspend fun getRequestById(id: Int): TheRepeatorRequest?
 }
@@ -43,6 +49,9 @@ interface IntruderResultDao {
 interface BrowserHistoryDao {
     @Query("SELECT * FROM browser_history ORDER BY timestamp DESC")
     fun getAllHistory(): Flow<List<BrowserHistoryItem>>
+
+    @Query("SELECT * FROM browser_history ORDER BY timestamp DESC")
+    suspend fun getAllHistorySync(): List<BrowserHistoryItem>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(item: BrowserHistoryItem)
