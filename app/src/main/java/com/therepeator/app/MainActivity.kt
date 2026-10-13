@@ -61,6 +61,8 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
@@ -357,6 +359,13 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                             icon = { Icon(Icons.Default.LeakAdd, null) },
                             colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent, selectedContainerColor = Color(0xFF7C3AED).copy(alpha = 0.2f), unselectedTextColor = Color(0xFF94A3B8), selectedTextColor = Color.White, selectedIconColor = Color(0xFF7C3AED))
                         )
+                        NavigationDrawerItem(
+                            label = { Text("Shell") },
+                            selected = selectedTab == 7,
+                            onClick = { vm.selectBottomTab(7); scope.launch { drawerState.close() } },
+                            icon = { Icon(Icons.Default.Terminal, null) },
+                            colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent, selectedContainerColor = Color(0xFF7C3AED).copy(alpha = 0.2f), unselectedTextColor = Color(0xFF94A3B8), selectedTextColor = Color.White, selectedIconColor = Color(0xFF7C3AED))
+                        )
                         
                         Spacer(Modifier.weight(1f))
                         NavigationDrawerItem(
@@ -415,6 +424,7 @@ fun TheRepeatorAppScreen(vm: TheRepeatorViewModel) {
                     4 -> HistoryTabWrapper(vm, context)
                     5 -> BrowserTabWrapper(vm, browserWebView, loadProgress, { showBrowserHistory = true }, { showInterceptSettings = true })
                     6 -> ComparerTabWrapper(vm)
+                    7 -> ShellTabWrapper(vm, context)
                 }
             }
         }
@@ -810,6 +820,29 @@ private fun ComparerTabWrapper(vm: TheRepeatorViewModel) {
     val text1 by vm.comparerText1.collectAsState()
     val text2 by vm.comparerText2.collectAsState()
     ComparerTab(text1, text2, onText1Change = { vm.updateComparerText1(it) }, onText2Change = { vm.updateComparerText2(it) })
+}
+
+@Composable
+private fun ShellTabWrapper(vm: TheRepeatorViewModel, context: Context) {
+    val output by vm.shellOutput.collectAsState()
+    val input by vm.shellInput.collectAsState()
+    val prompt by vm.shellPrompt.collectAsState()
+    val isRunning by vm.isShellRunning.collectAsState()
+    val history by vm.shellHistory.collectAsState()
+    val scope = rememberCoroutineScope()
+
+    ShellTab(
+        output = output,
+        input = input,
+        prompt = prompt,
+        isRunning = isRunning,
+        history = history,
+        onInputChange = { vm.updateShellInput(it) },
+        onRunCommand = { vm.runShellCommand(it) },
+        onStopCommand = { vm.stopShellCommand() },
+        onClearOutput = { vm.clearShellOutput() },
+        onCopyOutput = { copyToClipboard(context, output, scope) }
+    )
 }
 
 private fun copyToClipboard(context: Context, text: String, scope: CoroutineScope) { 
@@ -2166,6 +2199,310 @@ private fun ComparerTab(text1: String, text2: String, onText1Change: (String) ->
                         }
                     }
                     HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShellTab(
+    output: String,
+    input: String,
+    prompt: String,
+    isRunning: Boolean,
+    history: List<String>,
+    onInputChange: (String) -> Unit,
+    onRunCommand: (String?) -> Unit,
+    onStopCommand: () -> Unit,
+    onClearOutput: () -> Unit,
+    onCopyOutput: () -> Unit
+) {
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
+    var showHistoryDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(output) {
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0B0F19))
+            .imePadding()
+            .padding(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Terminal,
+                    contentDescription = null,
+                    tint = Color(0xFFA855F7),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Linux Terminal",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                if (isRunning) {
+                    Spacer(modifier = Modifier.width(10.dp))
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = Color(0xFF22C55E),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Running...", color = Color(0xFF22C55E), fontSize = 11.sp)
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isRunning) {
+                    IconButton(onClick = onStopCommand, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Stop, contentDescription = "Stop", tint = Color(0xFFEF4444))
+                    }
+                }
+                IconButton(onClick = { showHistoryDialog = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.History, contentDescription = "History", tint = Color(0xFF94A3B8))
+                }
+                IconButton(onClick = onCopyOutput, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy Output", tint = Color(0xFF94A3B8))
+                }
+                IconButton(onClick = onClearOutput, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.DeleteSweep, contentDescription = "Clear", tint = Color(0xFF94A3B8))
+                }
+                IconButton(onClick = { showHelpDialog = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = "Help", tint = Color(0xFF94A3B8))
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(Color(0xFF030712), RoundedCornerShape(8.dp))
+                .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                .padding(10.dp)
+        ) {
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(scrollState)
+                ) {
+                    Text(
+                        text = output,
+                        color = Color(0xFF4ADE80),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF0F172A), RoundedCornerShape(10.dp))
+                .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                .clickable { focusRequester.requestFocus() }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = prompt,
+                color = Color(0xFF22C55E),
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .widthIn(max = 200.dp)
+                    .padding(end = 4.dp)
+            )
+
+            BasicTextField(
+                value = input,
+                onValueChange = onInputChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(focusRequester)
+                    .padding(vertical = 8.dp)
+                    .onFocusChanged { if (it.isFocused) { scope.launch { scrollState.animateScrollTo(scrollState.maxValue) } } },
+                textStyle = TextStyle(
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace
+                ),
+                cursorBrush = SolidColor(Color(0xFF22C55E)),
+                singleLine = false,
+                maxLines = 4,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { onRunCommand(null) }),
+                decorationBox = { innerTextField ->
+                    if (input.isEmpty()) {
+                        Text(
+                            text = "command...",
+                            color = Color(0xFF64748B),
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    innerTextField()
+                }
+            )
+
+            if (isRunning) {
+                IconButton(
+                    onClick = onStopCommand,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "Stop",
+                        tint = Color(0xFFEF4444)
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = { onRunCommand(null) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Run",
+                        tint = Color(0xFFA855F7)
+                    )
+                }
+            }
+        }
+    }
+
+    if (showHistoryDialog) {
+        Dialog(onDismissRequest = { showHistoryDialog = false }) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Command History", color = Color.White, fontWeight = FontWeight.Bold)
+                        IconButton(
+                            onClick = { showHistoryDialog = false },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, null, tint = Color.Gray)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    if (history.isEmpty()) {
+                        Text("No commands run yet.", color = Color.Gray, fontSize = 12.sp)
+                    } else {
+                        LazyColumn {
+                            items(history.reversed()) { cmd ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onInputChange(cmd)
+                                            showHistoryDialog = false
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = cmd,
+                                        color = Color(0xFF38BDF8),
+                                        fontSize = 13.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                                HorizontalDivider(color = Color(0xFF334155))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showHelpDialog) {
+        Dialog(onDismissRequest = { showHelpDialog = false }) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Linux Shell Help", color = Color.White, fontWeight = FontWeight.Bold)
+                        IconButton(
+                            onClick = { showHelpDialog = false },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, null, tint = Color.Gray)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    val helpItems = listOf(
+                        "Change Directory" to "cd /path/to/dir",
+                        "List Files" to "ls -la",
+                        "Print Working Dir" to "pwd",
+                        "Ping Host" to "ping -c 4 google.com",
+                        "Curl Request" to "curl -i https://httpbin.org/get",
+                        "View File Content" to "cat filename.txt",
+                        "Environment Vars" to "env",
+                        "Clear Screen" to "clear"
+                    )
+                    helpItems.forEach { (title, example) ->
+                        Text(title, color = Color(0xFFA855F7), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        Text(
+                            example,
+                            color = Color(0xFFE2E8F0),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF0F172A), RoundedCornerShape(4.dp))
+                                .clickable {
+                                    onInputChange(example)
+                                    showHelpDialog = false
+                                }
+                                .padding(6.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
             }
         }

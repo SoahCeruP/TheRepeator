@@ -1,0 +1,12 @@
+TheRepeator is a Privacy-focused, Free and Open Source (FOSS) mobile HTTP request testing and replay tool for Android.
+
+Key Features:
+- Repeater: Compose, send, and resend custom HTTP/HTTPS requests on the fly
+- Request Editing: Modify HTTP methods (GET, POST, PUT, DELETE, PATCH, etc.), custom headers, query parameters, and request body payload
+- Response Viewer: Inspect HTTP status codes, execution timing, protocol headers, and formatted response bodies with syntax highlighting
+- History Management: Maintain a local log of all previous requests and responses with search and scope filtering
+- Intruder & Fuzzing: Automate payload testing and parameter fuzzing with configurable concurrency and filters
+- Utilities & Decoders: Integrated Base64, URL, Hex, HTML entity, and JWT decoder tools
+- Local Interception & Rules: Configure host scope rules and match/replace transformations
+
+TheRepeator is designed specifically as an open-source manual request tool and replay tester with zero tracking, zero telemetries, and no closed-source third-party dependencies.

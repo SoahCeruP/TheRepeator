@@ -22,6 +22,7 @@ import java.util.Locale
 import java.util.*
 import kotlin.time.Duration.Companion.milliseconds
 import java.util.concurrent.TimeUnit
+import java.io.File
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
@@ -116,6 +117,50 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
     private val _authorizedInsecureDomains = MutableStateFlow(setOf<String>())
     val authorizedInsecureDomains = _authorizedInsecureDomains.asStateFlow()
 
+    // Shell State
+    private val appFilesDir: File get() = getApplication<Application>().filesDir
+    private var currentDirectory: File? = null
+    private val curDir: File get() = currentDirectory ?: appFilesDir
+    private var lastDirectory: File? = null
+    private var userName: String = "shell"
+
+    private fun getShellPrompt(compact: Boolean = false): String {
+        val path = curDir.absolutePath
+        val homePath = appFilesDir.absolutePath
+        val displayPath = when {
+            path == homePath -> "~"
+            path.startsWith(homePath) -> "~" + path.substring(homePath.length)
+            else -> path
+        }
+        val finalPath = if (compact && displayPath.length > 22) {
+            val parts = displayPath.split("/").filter { it.isNotEmpty() }
+            if (parts.size > 2) ".../" + parts.takeLast(2).joinToString("/")
+            else "..." + displayPath.takeLast(19)
+        } else {
+            displayPath
+        }
+        return "$userName@android:$finalPath$ "
+    }
+
+    private val defaultShellBanner = "Linux android 5.x #1 SMP PREEMPT\nTheRepeator Terminal (Non-Root Shell)\nType commands below (e.g. ping, curl, ls, cd, pwd, cat, env, etc.)\n\n"
+    private val _shellOutput = MutableStateFlow(defaultShellBanner)
+    val shellOutput = _shellOutput.asStateFlow()
+
+    private val _shellInput = MutableStateFlow("")
+    val shellInput = _shellInput.asStateFlow()
+
+    private val _shellPrompt = MutableStateFlow(getShellPrompt(compact = true))
+    val shellPrompt = _shellPrompt.asStateFlow()
+
+    private val _isShellRunning = MutableStateFlow(false)
+    val isShellRunning = _isShellRunning.asStateFlow()
+
+    private val _shellHistory = MutableStateFlow<List<String>>(emptyList())
+    val shellHistory = _shellHistory.asStateFlow()
+
+    private var activeShellJob: Job? = null
+    private var activeShellProcess: Process? = null
+
     val browserHistory: StateFlow<List<BrowserHistoryItem>> = repository.browserHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -190,6 +235,18 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                     _interceptedRequest.value = request
                 }
             }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val p = ProcessBuilder("id", "-un").start()
+                val user = p.inputStream.bufferedReader().readLine()?.trim()
+                if (!user.isNullOrEmpty()) {
+                    userName = user
+                    withContext(Dispatchers.Main) {
+                        _shellPrompt.value = getShellPrompt(compact = true)
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -1742,5 +1799,143 @@ class TheRepeatorViewModel(application: Application) : AndroidViewModel(applicat
                 tabs.mapIndexed { idx, t -> if (idx == i) t.copy(response = res, redirectUrl = null) else t }
             } else tabs
         }
+    }
+
+    fun updateShellInput(text: String) {
+        _shellInput.value = text
+    }
+
+    fun clearShellOutput() {
+        _shellOutput.value = defaultShellBanner
+    }
+
+    fun runShellCommand(commandToRun: String? = null) {
+        val cmd = (commandToRun ?: _shellInput.value).trim()
+        if (cmd.isEmpty()) return
+
+        if (_isShellRunning.value) {
+            stopShellCommand()
+        }
+
+        val currentHistory = _shellHistory.value
+        if (currentHistory.isEmpty() || currentHistory.last() != cmd) {
+            _shellHistory.value = (currentHistory + cmd).takeLast(50)
+        }
+
+        _shellInput.value = ""
+        val currentPrompt = getShellPrompt(compact = false)
+        _shellOutput.value += "$currentPrompt$cmd\n"
+
+        if (cmd == "clear") {
+            clearShellOutput()
+            return
+        }
+
+        if (cmd == "help" || cmd == "?" || cmd == "help -h" || cmd == "help --help") {
+            _shellOutput.value += """
+TheRepeator Linux Shell - Available Commands & Examples:
+
+File System Commands:
+  cd <path>                 Change current working directory (e.g., cd /sdcard, cd ..)
+  pwd                       Print current working directory
+  ls [-la] [path]           List directory files and details
+  cat <file>                Display file contents
+  mkdir <dir>               Create a new directory
+  rm [-rf] <file/dir>       Remove file or directory
+
+Networking & Web Tools:
+  ping -c <count> <host>    Send ICMP ping requests (e.g., ping -c 4 google.com)
+  curl -i [options] <url>   HTTP client (e.g., curl -i https://httpbin.org/get)
+  ip [addr/route]           Show network interfaces and routing info
+  netstat -an               Display active sockets & ports
+  nslookup <domain>         Query DNS domain lookup
+
+System & Shell Utilities:
+  id / whoami               Display process UID/GID and username
+  uname -a                  Print system architecture and kernel info
+  env                       List environment variables
+  ps                        Display process list
+  clear                     Clear terminal screen output
+  help                      Show this command menu
+
+""".trimIndent() + "\n\n"
+            return
+        }
+
+        if (cmd == "cd" || cmd.startsWith("cd ")) {
+            val arg = cmd.substringAfter("cd").trim()
+            val homePath = appFilesDir
+            val target = when {
+                arg.isEmpty() || arg == "~" -> homePath
+                arg == "-" -> lastDirectory ?: homePath
+                arg.startsWith("/") -> File(arg)
+                else -> File(curDir, arg)
+            }
+            val canonical = try { target.canonicalFile } catch (e: Exception) { target }
+            if (canonical.exists() && canonical.isDirectory) {
+                lastDirectory = curDir
+                currentDirectory = canonical
+                _shellPrompt.value = getShellPrompt(compact = true)
+            } else {
+                _shellOutput.value += "sh: cd: $arg: No such file or directory\n\n"
+            }
+            return
+        }
+
+        _isShellRunning.value = true
+
+        activeShellJob = viewModelScope.launch(Dispatchers.IO) {
+            var process: Process? = null
+            try {
+                val pb = ProcessBuilder("sh", "-c", cmd)
+                pb.directory(curDir)
+                pb.redirectErrorStream(true)
+                process = pb.start()
+                activeShellProcess = process
+
+                val reader = process.inputStream.bufferedReader()
+                val buffer = CharArray(1024)
+                var charsRead = 0
+
+                while (coroutineContext.isActive && reader.read(buffer).also { charsRead = it } != -1) {
+                    val chunk = String(buffer, 0, charsRead)
+                    withContext(Dispatchers.Main) {
+                        val current = _shellOutput.value
+                        val combined = current + chunk
+                        if (combined.length > 200_000) {
+                            _shellOutput.value = defaultShellBanner + "... [Output truncated due to size] ...\n" + combined.takeLast(120_000)
+                        } else {
+                            _shellOutput.value = combined
+                        }
+                    }
+                }
+
+                val exitCode = process.waitFor()
+                withContext(Dispatchers.Main) {
+                    if (exitCode != 0) {
+                        _shellOutput.value += "[Exit code $exitCode]\n"
+                    }
+                    _shellOutput.value += "\n"
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _shellOutput.value += "sh: ${e.localizedMessage ?: e.message}\n\n"
+                }
+            } finally {
+                process?.destroy()
+                activeShellProcess = null
+                withContext(Dispatchers.Main) {
+                    _isShellRunning.value = false
+                }
+            }
+        }
+    }
+
+    fun stopShellCommand() {
+        activeShellJob?.cancel()
+        activeShellProcess?.destroy()
+        activeShellProcess = null
+        _isShellRunning.value = false
+        _shellOutput.value += "\n[Process killed by user]\n\n"
     }
 }

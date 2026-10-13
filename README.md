@@ -45,9 +45,40 @@ In other words, TheRepeator is best used as a manual request tool and replay tes
 
 ---
 
+## F-Droid Publishing & Fastlane Metadata
+
+This application is 100% Free and Open Source Software (FOSS). It contains no closed-source SDKs, tracking libraries, or proprietary Google Play dependencies.
+
+App metadata for F-Droid publishing is provided in Fastlane format under:
+- `fastlane/metadata/android/en-US/title.txt`
+- `fastlane/metadata/android/en-US/short_description.txt`
+- `fastlane/metadata/android/en-US/full_description.txt`
+- `fastlane/metadata/android/en-US/changelogs/`
+
+F-Droid build recipe template:
+- `metadata/com.therepeator.app.yml`
+
+---
+
+## Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/SoahCeruP/TheRepeator.git
+cd TheRepeator
+
+# Build debug APK
+./gradlew app:assembleDebug
+```
+
+---
 
 ## Releases
 
-You can find the latest APK in the [Releases](https://github.com/SoahCeruP/TheRepeator/releases) section.
+You can find the latest APK in the [Releases](https://github.com/SoahCeruP/TheRepeator/releases) section or on [F-Droid](https://f-droid.org).
 
 ---
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.

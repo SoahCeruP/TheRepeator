@@ -1,0 +1,5 @@
+- Initial release on F-Droid (v1.0.1)
+- Full HTTP request repeater & response inspector
+- Built-in decoder tools (Base64, URL, Hex, JWT)
+- Request history and scope filtering
+- Intruder parameter payload testing
