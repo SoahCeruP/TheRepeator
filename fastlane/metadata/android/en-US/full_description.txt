@@ -1,12 +1,14 @@
-TheRepeator is a Privacy-focused, Free and Open Source (FOSS) mobile HTTP request testing and replay tool for Android.
+TheRepeator is a privacy-focused, Free and Open Source (FOSS) mobile HTTP request testing and replay tool for Android.
 
-Key Features:
-- Repeater: Compose, send, and resend custom HTTP/HTTPS requests on the fly
-- Request Editing: Modify HTTP methods (GET, POST, PUT, DELETE, PATCH, etc.), custom headers, query parameters, and request body payload
-- Response Viewer: Inspect HTTP status codes, execution timing, protocol headers, and formatted response bodies with syntax highlighting
-- History Management: Maintain a local log of all previous requests and responses with search and scope filtering
-- Intruder & Fuzzing: Automate payload testing and parameter fuzzing with configurable concurrency and filters
-- Utilities & Decoders: Integrated Base64, URL, Hex, HTML entity, and JWT decoder tools
-- Local Interception & Rules: Configure host scope rules and match/replace transformations
+<b>Key Features:</b>
+<ul>
+  <li><b>Repeater:</b> Compose, send, and resend custom HTTP/HTTPS requests on the fly</li>
+  <li><b>Request Editing:</b> Modify HTTP methods (GET, POST, PUT, DELETE, PATCH, etc.), custom headers, query parameters, and request body payloads</li>
+  <li><b>Response Viewer:</b> Inspect HTTP status codes, execution timing, protocol headers, and formatted response bodies with syntax highlighting</li>
+  <li><b>History Management:</b> Maintain a local log of all previous requests and responses with search and scope filtering</li>
+  <li><b>Intruder & Fuzzing:</b> Automate payload testing and parameter fuzzing with configurable concurrency and filters</li>
+  <li><b>Utilities & Decoders:</b> Integrated Base64, URL, Hex, HTML entity, and JWT decoder tools</li>
+  <li><b>Local Interception & Rules:</b> Configure host scope rules and match/replace transformations</li>
+</ul>
 
-TheRepeator is designed specifically as an open-source manual request tool and replay tester with zero tracking, zero telemetries, and no closed-source third-party dependencies.
+TheRepeator is designed specifically as an open-source manual request tool and replay tester with zero tracking, zero telemetry, and no closed-source third-party dependencies.
